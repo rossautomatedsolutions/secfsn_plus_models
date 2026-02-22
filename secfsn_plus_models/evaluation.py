@@ -21,11 +21,14 @@ def _period_decile_spread(group: pd.DataFrame) -> float:
     if valid.empty:
         return float("nan")
 
-    mean_returns = valid.groupby("decile")["y_true"].mean()
-    if 0 not in mean_returns.index or mean_returns.index.max() not in mean_returns.index:
+    if valid["decile"].nunique() != 10:
         return float("nan")
 
-    return float(mean_returns.loc[mean_returns.index.max()] - mean_returns.loc[0])
+    mean_returns = valid.groupby("decile")["y_true"].mean()
+    if not set(range(10)).issubset({int(decile) for decile in mean_returns.index}):
+        return float("nan")
+
+    return float(mean_returns.loc[9] - mean_returns.loc[0])
 
 
 def evaluate_cross_sectional_model(

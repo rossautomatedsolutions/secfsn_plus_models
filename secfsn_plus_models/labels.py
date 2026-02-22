@@ -51,8 +51,10 @@ def compute_next_period_return(
         raise ValueError("features_df index must include levels ['cik', 'period'].")
 
     price_series = features_df[price_column]
-    next_price = price_series.groupby(level="cik", sort=False).shift(-1)
-    forward_return = (next_price / price_series) - 1.0
+    ordered_prices = price_series.sort_index(level=INDEX_NAMES)
+
+    next_price = ordered_prices.groupby(level="cik", sort=False).shift(-1)
+    forward_return = ((next_price / ordered_prices) - 1.0).reindex(price_series.index)
     forward_return = forward_return.dropna()
     forward_return.name = "next_period_return"
 
