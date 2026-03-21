@@ -1,16 +1,19 @@
-"""Time-based splitting utilities for quarterly model training workflows."""
+"""Time-based dataset splitting utilities."""
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
-
 import pandas as pd
+
+from .utils import copy_aligned_frame_and_series
+
+
+_PERIOD_PATTERN = r"^(?P<year>\d{4})Q(?P<quarter>[1-4])$"
 
 
 def _period_to_ordinal(periods: pd.Index) -> pd.Series:
-    """Convert canonical period labels ``YYYYQ#`` into sortable ordinals."""
-    period_series = pd.Series(periods, index=periods)
-    extracted = period_series.str.extract(r"^(?P<year>\d{4})Q(?P<quarter>[1-4])$")
+    """Convert canonical ``YYYYQ#`` labels into sortable ordinals."""
+    period_series = pd.Series(periods.astype(str), index=periods)
+    extracted = period_series.str.extract(_PERIOD_PATTERN)
     if extracted.isna().any().any():
         raise ValueError("All period labels must follow canonical format 'YYYYQ#'.")
 
@@ -19,56 +22,73 @@ def _period_to_ordinal(periods: pd.Index) -> pd.Series:
     return years * 4 + (quarters - 1)
 
 
+def _validate_non_empty_split(name: str, X_split: pd.DataFrame, y_split: pd.Series, *, required: bool) -> None:
+    """Validate that a split is non-empty when required."""
+    if required and (X_split.empty or y_split.empty):
+        raise ValueError(f"The {name} split is empty. Adjust the requested period boundaries.")
+
+
 def time_based_split(
     X: pd.DataFrame,
     y: pd.Series,
     train_end_period: str,
-    val_end_period: Optional[str] = None,
-) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
-    """Split dataset by canonical quarterly period boundaries.
+    val_end_period: str | None = None,
+) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    """Split aligned features and labels by inclusive quarterly period cutoffs.
 
-    Parameters
-    ----------
-    X
+    Assumptions
+    -----------
+    * ``X`` and ``y`` are indexed by ``MultiIndex(['cik', 'period'])``.
+    * Period labels follow the canonical ``YYYYQ#`` format.
+    * Input ordering is preserved within each returned split.
+
+    Input schema
+    ------------
+    ``X``
         Feature dataframe indexed by ``(cik, period)``.
-    y
+    ``y``
         Label series indexed by ``(cik, period)``.
-    train_end_period
-        Inclusive end period for training set.
-    val_end_period
-        Inclusive end period for validation set. If omitted, validation is
-        returned empty and all periods after ``train_end_period`` are test.
+    ``train_end_period``
+        Inclusive upper bound of the training split.
+    ``val_end_period``
+        Optional inclusive upper bound of the validation split.
 
-    Returns
-    -------
-    Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]
-        ``X_train, y_train, X_val, y_val, X_test, y_test``.
+    Output schema
+    -------------
+    Returns ``(X_train, y_train, X_val, y_val, X_test, y_test)``. Every object preserves the
+    aligned ``(cik, period)`` MultiIndex and contains a subset of the input rows.
+
+    Raises
+    ------
+    ValueError
+        If period labels are invalid, split boundaries are inconsistent, or a required split is empty.
     """
-    common_index = X.index.intersection(y.index)
-    X_aligned = X.loc[common_index]
-    y_aligned = y.loc[common_index]
+    X_aligned, y_aligned = copy_aligned_frame_and_series(X, y, object_names=("X", "y"))
 
-    periods = X_aligned.index.get_level_values("period")
-    period_ord = _period_to_ordinal(pd.Index(periods))
-    train_end_ord = _period_to_ordinal(pd.Index([train_end_period])).iloc[0]
+    periods = pd.Index(X_aligned.index.get_level_values("period"))
+    period_ord = pd.Series(_period_to_ordinal(periods).to_numpy(), index=X_aligned.index)
+    train_end_ord = int(_period_to_ordinal(pd.Index([train_end_period])).iloc[0])
 
     train_mask = period_ord <= train_end_ord
 
     if val_end_period is None:
-        val_mask = pd.Series(False, index=period_ord.index)
+        val_mask = pd.Series(False, index=X_aligned.index)
         test_mask = period_ord > train_end_ord
+        validation_required = False
     else:
-        val_end_ord = _period_to_ordinal(pd.Index([val_end_period])).iloc[0]
+        val_end_ord = int(_period_to_ordinal(pd.Index([val_end_period])).iloc[0])
         if val_end_ord < train_end_ord:
-            raise ValueError("val_end_period must be >= train_end_period.")
+            raise ValueError("val_end_period must be greater than or equal to train_end_period.")
         val_mask = (period_ord > train_end_ord) & (period_ord <= val_end_ord)
         test_mask = period_ord > val_end_ord
+        validation_required = True
 
-    return (
-        X_aligned.loc[train_mask.values],
-        y_aligned.loc[train_mask.values],
-        X_aligned.loc[val_mask.values],
-        y_aligned.loc[val_mask.values],
-        X_aligned.loc[test_mask.values],
-        y_aligned.loc[test_mask.values],
-    )
+    X_train, y_train = X_aligned.loc[train_mask].copy(), y_aligned.loc[train_mask].copy()
+    X_val, y_val = X_aligned.loc[val_mask].copy(), y_aligned.loc[val_mask].copy()
+    X_test, y_test = X_aligned.loc[test_mask].copy(), y_aligned.loc[test_mask].copy()
+
+    _validate_non_empty_split("train", X_train, y_train, required=True)
+    _validate_non_empty_split("validation", X_val, y_val, required=validation_required)
+    _validate_non_empty_split("test", X_test, y_test, required=True)
+
+    return X_train, y_train, X_val, y_val, X_test, y_test

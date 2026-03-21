@@ -12,7 +12,7 @@ from .base import BaseModel
 
 @dataclass
 class LinearRegressionModel(BaseModel):
-    """Wrapper around ``sklearn.linear_model.LinearRegression``."""
+    """Pandas-safe wrapper around ``sklearn.linear_model.LinearRegression``."""
 
     fit_intercept: bool = True
     n_jobs: int | None = None
@@ -26,9 +26,10 @@ class LinearRegressionModel(BaseModel):
         return "linear_regression"
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "LinearRegressionModel":
+        self._validate_training_data(X, y)
         self._model.fit(X, y)
         return self
 
     def predict(self, X: pd.DataFrame) -> pd.Series:
-        preds = self._model.predict(X)
-        return pd.Series(preds, index=X.index, name="prediction")
+        self._validate_prediction_input(X)
+        return pd.Series(self._model.predict(X), index=X.index, name="prediction")
