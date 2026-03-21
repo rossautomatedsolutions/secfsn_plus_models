@@ -221,7 +221,7 @@ def resolve_train_end_period(
     test_size: int | None,
 ) -> str:
     """Choose the effective training cutoff from explicit config or from ``test_size``."""
-    aligned_periods = pd.Index(features_df.index.intersection(labels.index).get_level_values("period")).unique()
+    aligned_periods = pd.Index(features_df.index.intersection(labels.index).get_level_values("period")).unique().sort_values()
     if aligned_periods.empty:
         raise ValueError("Unable to resolve a training split because the aligned dataset is empty.")
 
@@ -237,7 +237,7 @@ def resolve_train_end_period(
         raise ValueError(
             f"config.test_size={test_size} leaves no training periods; aligned periods are {list(aligned_periods)}."
         )
-    return str(aligned_periods[-(test_size + 1)])
+    return str(aligned_periods[-test_size])
 
 
 def build_pipeline_artifacts(config: ResolvedConfig) -> PipelineArtifacts:

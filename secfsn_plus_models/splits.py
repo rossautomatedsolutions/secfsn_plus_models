@@ -87,6 +87,13 @@ def time_based_split(
     X_val, y_val = X_aligned.loc[val_mask].copy(), y_aligned.loc[val_mask].copy()
     X_test, y_test = X_aligned.loc[test_mask].copy(), y_aligned.loc[test_mask].copy()
 
+    X_train = X_train.sort_index(level=["period", "cik"])
+    y_train = y_train.sort_index(level=["period", "cik"])
+    X_val = X_val.sort_index(level=["period", "cik"])
+    y_val = y_val.sort_index(level=["period", "cik"])
+    X_test = X_test.sort_index(level=["period", "cik"])
+    y_test = y_test.sort_index(level=["period", "cik"])
+
     _validate_non_empty_split("train", X_train, y_train, required=True)
     _validate_non_empty_split("validation", X_val, y_val, required=validation_required)
     _validate_non_empty_split("test", X_test, y_test, required=True)
