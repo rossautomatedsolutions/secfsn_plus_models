@@ -1,4 +1,4 @@
-"""Evaluation routines for quarterly cross-sectional model outputs."""
+"""Evaluation routines built from pure metric computations."""
 
 from __future__ import annotations
 
@@ -6,74 +6,115 @@ import numpy as np
 import pandas as pd
 
 from .metrics import information_coefficient, rank_information_coefficient
+from .utils import copy_aligned_series_pair
 
 
-def _period_decile_spread(group: pd.DataFrame) -> float:
-    """Compute top-minus-bottom decile spread for one period."""
-    if group["y_pred"].nunique() < 10:
-        return float("nan")
+def decile_spread(y_true: pd.Series, y_pred: pd.Series) -> pd.Series:
+    """Compute period-level top-minus-bottom prediction decile spread.
 
-    deciles = pd.qcut(group["y_pred"], q=10, labels=False, duplicates="drop")
-    if deciles.isna().all():
-        return float("nan")
+    Assumptions
+    -----------
+    * ``y_true`` and ``y_pred`` are indexed by ``MultiIndex(['cik', 'period'])``.
+    * Deciles are formed independently within each period using prediction ranks.
 
-    valid = group.assign(decile=deciles).dropna(subset=["decile", "y_true"])
-    if valid.empty:
-        return float("nan")
+    Input schema
+    ------------
+    ``y_true`` and ``y_pred``
+        Series indexed by ``(cik, period)``.
 
-    if valid["decile"].nunique() != 10:
-        return float("nan")
+    Output schema
+    -------------
+    Series indexed by ``period`` containing the mean realized return of the top prediction decile
+    minus the bottom prediction decile for each eligible period.
+    """
+    true_aligned, pred_aligned = copy_aligned_series_pair(
+        y_true,
+        y_pred,
+        object_names=("y_true", "y_pred"),
+        require_non_empty=False,
+    )
+    frame = pd.DataFrame({"y_true": true_aligned, "y_pred": pred_aligned}).dropna()
+    if frame.empty:
+        return pd.Series(dtype=float, name="decile_spread")
 
-    mean_returns = valid.groupby("decile")["y_true"].mean()
-    if not set(range(10)).issubset({int(decile) for decile in mean_returns.index}):
-        return float("nan")
+    def _spread_for_period(group: pd.DataFrame) -> float:
+        if group["y_pred"].nunique() < 10:
+            return float("nan")
 
-    return float(mean_returns.loc[9] - mean_returns.loc[0])
+        deciles = pd.qcut(group["y_pred"], q=10, labels=False, duplicates="drop")
+        if deciles.isna().all():
+            return float("nan")
+
+        valid_group = group.assign(decile=deciles).dropna(subset=["decile", "y_true"])
+        if valid_group["decile"].nunique() != 10:
+            return float("nan")
+
+        mean_returns = valid_group.groupby("decile")["y_true"].mean()
+        return float(mean_returns.loc[9] - mean_returns.loc[0])
+
+    spreads = frame.groupby(level="period", sort=False).apply(_spread_for_period)
+    spreads = spreads.replace([np.inf, -np.inf], np.nan).dropna()
+    spreads.name = "decile_spread"
+    spreads.index.name = "period"
+    return spreads
 
 
 def evaluate_cross_sectional_model(
     y_true: pd.Series,
     y_pred: pd.Series,
-    periods: pd.Index,
-) -> dict[str, float]:
-    """Evaluate model predictions with IC, Rank IC, and decile spread.
+    periods: pd.Index | None = None,
+) -> pd.Series:
+    """Summarize IC, Rank IC, and decile spread for selected periods.
 
-    Parameters
-    ----------
-    y_true
-        Realized next-period returns indexed by ``(cik, period)``.
-    y_pred
-        Model predictions indexed by ``(cik, period)``.
-    periods
-        Period labels to include in evaluation.
+    Assumptions
+    -----------
+    * ``y_true`` and ``y_pred`` are indexed by ``MultiIndex(['cik', 'period'])``.
+    * If ``periods`` is provided, it contains period labels present in the input index.
 
-    Returns
-    -------
-    dict[str, float]
-        Dictionary containing ``IC``, ``RankIC``, and ``DecileSpread``.
+    Input schema
+    ------------
+    ``y_true`` and ``y_pred``
+        Series indexed by ``(cik, period)``.
+    ``periods``
+        Optional index of period labels to include.
+
+    Output schema
+    -------------
+    Series indexed by ``['IC', 'RankIC', 'DecileSpread']`` containing the mean value of each
+    metric across the selected periods.
     """
-    mask_true = y_true.index.get_level_values("period").isin(periods)
-    mask_pred = y_pred.index.get_level_values("period").isin(periods)
+    true_aligned, pred_aligned = copy_aligned_series_pair(
+        y_true,
+        y_pred,
+        object_names=("y_true", "y_pred"),
+        require_non_empty=False,
+    )
 
-    y_true_f = y_true.loc[mask_true]
-    y_pred_f = y_pred.loc[mask_pred]
+    if periods is not None:
+        period_filter = pd.Index(periods)
+        true_mask = true_aligned.index.get_level_values("period").isin(period_filter)
+        pred_mask = pred_aligned.index.get_level_values("period").isin(period_filter)
+        true_aligned = true_aligned.loc[true_mask].copy()
+        pred_aligned = pred_aligned.loc[pred_mask].copy()
 
-    common_index = y_true_f.index.intersection(y_pred_f.index)
-    frame = pd.DataFrame(
+    if true_aligned.empty or pred_aligned.empty or true_aligned.index.intersection(pred_aligned.index).empty:
+        return pd.Series(
+            {"IC": float("nan"), "RankIC": float("nan"), "DecileSpread": float("nan")},
+            dtype=float,
+            name="evaluation_summary",
+        )
+
+    ic = information_coefficient(true_aligned, pred_aligned)
+    rank_ic = rank_information_coefficient(true_aligned, pred_aligned)
+    spread = decile_spread(true_aligned, pred_aligned)
+
+    summary = pd.Series(
         {
-            "y_true": y_true_f.loc[common_index],
-            "y_pred": y_pred_f.loc[common_index],
-        }
-    ).dropna()
-
-    if frame.empty:
-        return {"IC": float("nan"), "RankIC": float("nan"), "DecileSpread": float("nan")}
-
-    spread_by_period = frame.groupby(level="period").apply(_period_decile_spread)
-    spread = float(spread_by_period.replace([np.inf, -np.inf], np.nan).dropna().mean())
-
-    return {
-        "IC": information_coefficient(frame["y_true"], frame["y_pred"]),
-        "RankIC": rank_information_coefficient(frame["y_true"], frame["y_pred"]),
-        "DecileSpread": spread,
-    }
+            "IC": float(ic.mean()) if not ic.empty else float("nan"),
+            "RankIC": float(rank_ic.mean()) if not rank_ic.empty else float("nan"),
+            "DecileSpread": float(spread.mean()) if not spread.empty else float("nan"),
+        },
+        dtype=float,
+    )
+    summary.name = "evaluation_summary"
+    return summary
