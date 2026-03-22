@@ -25,6 +25,16 @@ class NotebookDemoArtifacts:
     pipeline: PipelineArtifacts
     evaluation_summary: pd.Series
 
+    @property
+    def X(self) -> pd.DataFrame:
+        """Expose the aligned model feature matrix for notebook convenience."""
+        return self.pipeline.X
+
+    @property
+    def y(self) -> pd.Series:
+        """Expose the aligned model label series for notebook convenience."""
+        return self.pipeline.y
+
 
 DEFAULT_NOTEBOOK_MODELS = ["linear_regression", "random_forest"]
 
