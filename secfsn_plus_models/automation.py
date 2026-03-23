@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from .dataset import build_model_dataset
+from .evaluation import decile_return_summary
 from .labels import compute_next_period_return
 from .metrics import information_coefficient, rank_information_coefficient
 from .models.registry import ModelRegistry
@@ -60,9 +61,37 @@ class ResolvedConfig:
     model_type: str
     test_size: int | None
     feature_matrix_path: str | None
+    synthetic_seed: int
+    robustness_runs: int
+
+
+@dataclass(frozen=True)
+class RobustnessWarning:
+    """Interpretation flag emitted when robustness metrics indicate instability."""
+
+    model_name: str
+    metric_name: str
+    warning_type: str
+    message: str
+
+
+@dataclass(frozen=True)
+class RobustnessAnalysis:
+    """Per-run metrics, summary statistics, and warnings for robustness evaluation."""
+
+    per_run_metrics: pd.DataFrame
+    summary: pd.DataFrame
+    warnings: list[RobustnessWarning]
 
 
 SUPPORTED_FILE_SUFFIXES = {".csv", ".parquet", ".pkl", ".pickle"}
+DEFAULT_SYNTHETIC_SEED = 20240323
+DEFAULT_ROBUSTNESS_RUNS = 10
+HIGH_VARIANCE_RULES = {
+    "IC_mean": {"std_floor": 0.035, "range_floor": 0.12},
+    "RankIC_mean": {"std_floor": 0.050, "range_floor": 0.18},
+    "spread": {"std_floor": 0.030, "range_floor": 0.10},
+}
 
 
 def structured_step(title: str) -> None:
@@ -77,6 +106,8 @@ def resolve_runtime_config(config_module: Any) -> ResolvedConfig:
     model_type = getattr(config_module, "model_type", "linear")
     test_size = getattr(config_module, "test_size", None)
     feature_matrix_path = getattr(config_module, "feature_matrix_path", None)
+    synthetic_seed = getattr(config_module, "synthetic_seed", DEFAULT_SYNTHETIC_SEED)
+    robustness_runs = getattr(config_module, "robustness_runs", DEFAULT_ROBUSTNESS_RUNS)
 
     if not isinstance(price_column, str) or not price_column.strip():
         raise ValueError("config.price_column must be a non-empty string.")
@@ -101,6 +132,10 @@ def resolve_runtime_config(config_module: Any) -> ResolvedConfig:
 
     if feature_matrix_path is not None and not isinstance(feature_matrix_path, str):
         raise ValueError("config.feature_matrix_path must be None or a string path.")
+    if not isinstance(synthetic_seed, int):
+        raise ValueError("config.synthetic_seed must be an integer.")
+    if not isinstance(robustness_runs, int) or robustness_runs <= 0:
+        raise ValueError("config.robustness_runs must be a positive integer.")
 
     return ResolvedConfig(
         price_column=price_column.strip(),
@@ -108,15 +143,17 @@ def resolve_runtime_config(config_module: Any) -> ResolvedConfig:
         model_type=normalized_model_type,
         test_size=test_size,
         feature_matrix_path=feature_matrix_path,
+        synthetic_seed=synthetic_seed,
+        robustness_runs=robustness_runs,
     )
 
 
-def generate_synthetic_feature_matrix(price_column: str) -> pd.DataFrame:
+def generate_synthetic_feature_matrix(price_column: str, seed: int = DEFAULT_SYNTHETIC_SEED) -> pd.DataFrame:
     """Create a deterministic synthetic panel with weak-but-learnable predictive structure."""
     ciks = [f"{idx:04d}" for idx in range(1, 7)]
     periods = ["2020Q1", "2020Q2", "2020Q3", "2020Q4", "2021Q1", "2021Q2", "2021Q3"]
     index = pd.MultiIndex.from_product([ciks, periods], names=["cik", "period"])
-    rng = np.random.default_rng(20240323)
+    rng = np.random.default_rng(seed)
     feature_names = [
         "feature_growth",
         "feature_value",
@@ -378,7 +415,11 @@ def _read_feature_matrix(path: Path) -> pd.DataFrame:
     return frame.sort_index()
 
 
-def load_feature_matrix(price_column: str, feature_matrix_path: str | None = None) -> tuple[pd.DataFrame, str]:
+def load_feature_matrix(
+    price_column: str,
+    feature_matrix_path: str | None = None,
+    synthetic_seed: int = DEFAULT_SYNTHETIC_SEED,
+) -> tuple[pd.DataFrame, str]:
     """Load a real feature matrix when available, otherwise fall back to a synthetic dataset."""
     candidate_paths: list[Path] = []
     if feature_matrix_path:
@@ -389,8 +430,8 @@ def load_feature_matrix(price_column: str, feature_matrix_path: str | None = Non
             features_df = _read_feature_matrix(candidate)
             return features_df, f"loaded real dataset from {candidate}"
 
-    fallback = generate_synthetic_feature_matrix(price_column=price_column)
-    return fallback, "generated synthetic fallback dataset"
+    fallback = generate_synthetic_feature_matrix(price_column=price_column, seed=synthetic_seed)
+    return fallback, f"generated synthetic fallback dataset (seed={synthetic_seed})"
 
 
 def validate_feature_matrix_assumptions(features_df: pd.DataFrame, price_column: str) -> pd.Series:
@@ -460,9 +501,20 @@ def resolve_train_end_period(
     return str(aligned_periods[-test_size])
 
 
-def build_pipeline_artifacts(config: ResolvedConfig) -> PipelineArtifacts:
+def build_pipeline_artifacts(
+    config: ResolvedConfig,
+    *,
+    synthetic_seed: int | None = None,
+    model_type_override: str | None = None,
+) -> PipelineArtifacts:
     """Execute the end-to-end pipeline and return all major intermediate artifacts."""
-    features_df, _ = load_feature_matrix(config.price_column, config.feature_matrix_path)
+    effective_seed = config.synthetic_seed if synthetic_seed is None else synthetic_seed
+    effective_model_type = config.model_type if model_type_override is None else model_type_override
+    features_df, _ = load_feature_matrix(
+        config.price_column,
+        config.feature_matrix_path,
+        synthetic_seed=effective_seed,
+    )
     validate_feature_matrix_assumptions(features_df, config.price_column)
 
     labels = validate_label_generation(features_df, config.price_column)
@@ -477,7 +529,7 @@ def build_pipeline_artifacts(config: ResolvedConfig) -> PipelineArtifacts:
     if set(X_train.index).intersection(set(X_test.index)):
         raise ValueError("Invalid split: train and test datasets overlap.")
 
-    model = ModelRegistry.create(config.model_type)
+    model = ModelRegistry.create(effective_model_type)
     predictions = train_and_predict(model, X_train, y_train, X_test)
     ic_by_period = information_coefficient(y_test, predictions)
     rank_ic_by_period = rank_information_coefficient(y_test, predictions)
@@ -500,7 +552,11 @@ def build_pipeline_artifacts(config: ResolvedConfig) -> PipelineArtifacts:
 
 def run_diagnostics(config: ResolvedConfig) -> DiagnosticsReport:
     """Run validations required by the diagnostics CLI entrypoint."""
-    features_df, _ = load_feature_matrix(config.price_column, config.feature_matrix_path)
+    features_df, _ = load_feature_matrix(
+        config.price_column,
+        config.feature_matrix_path,
+        synthetic_seed=config.synthetic_seed,
+    )
     numeric_coverage = validate_feature_matrix_assumptions(features_df, config.price_column)
     labels = validate_label_generation(features_df, config.price_column)
     X, y, _ = build_model_dataset(features_df, labels, exclude_columns=[config.price_column, "sector_code"])
@@ -527,3 +583,155 @@ def run_diagnostics(config: ResolvedConfig) -> DiagnosticsReport:
         train_rows=len(X_train),
         test_rows=len(X_test),
     )
+
+
+def summarize_run_metrics(artifacts: PipelineArtifacts) -> pd.Series:
+    """Return single-run IC, RankIC, and spread metrics from pipeline artifacts."""
+    decile_summary = decile_return_summary(artifacts.y_test, artifacts.predictions)
+    return pd.Series(
+        {
+            "IC_mean": float(artifacts.ic_by_period.mean()) if not artifacts.ic_by_period.empty else float("nan"),
+            "RankIC_mean": float(artifacts.rank_ic_by_period.mean()) if not artifacts.rank_ic_by_period.empty else float("nan"),
+            "spread": float(decile_summary["spread"]),
+        },
+        dtype=float,
+        name="run_metrics",
+    )
+
+
+def build_robustness_summary(per_run_metrics: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate per-run metrics into mean/std/min/max summary statistics by model."""
+    if per_run_metrics.empty:
+        return pd.DataFrame(
+            columns=[
+                "model_name",
+                "IC_mean",
+                "IC_std",
+                "IC_min",
+                "IC_max",
+                "RankIC_mean",
+                "RankIC_std",
+                "RankIC_min",
+                "RankIC_max",
+                "spread_mean",
+                "spread_std",
+                "spread_min",
+                "spread_max",
+            ]
+        )
+
+    summary = (
+        per_run_metrics.groupby("model_name", sort=True)
+        .agg(
+            IC_mean=("IC_mean", "mean"),
+            IC_std=("IC_mean", "std"),
+            IC_min=("IC_mean", "min"),
+            IC_max=("IC_mean", "max"),
+            RankIC_mean=("RankIC_mean", "mean"),
+            RankIC_std=("RankIC_mean", "std"),
+            RankIC_min=("RankIC_mean", "min"),
+            RankIC_max=("RankIC_mean", "max"),
+            spread_mean=("spread", "mean"),
+            spread_std=("spread", "std"),
+            spread_min=("spread", "min"),
+            spread_max=("spread", "max"),
+        )
+        .reset_index()
+    )
+    numeric_columns = [column for column in summary.columns if column != "model_name"]
+    summary.loc[:, numeric_columns] = summary.loc[:, numeric_columns].astype(float)
+    return summary
+
+
+def interpret_robustness_summary(summary: pd.DataFrame) -> list[RobustnessWarning]:
+    """Generate warning flags for high variance or wide performance ranges."""
+    warnings: list[RobustnessWarning] = []
+    metric_columns = {
+        "IC_mean": ("IC_mean", "IC_std", "IC_min", "IC_max"),
+        "RankIC_mean": ("RankIC_mean", "RankIC_std", "RankIC_min", "RankIC_max"),
+        "spread": ("spread_mean", "spread_std", "spread_min", "spread_max"),
+    }
+
+    for row in summary.to_dict(orient="records"):
+        model_name = str(row["model_name"])
+        for metric_name, (mean_key, std_key, min_key, max_key) in metric_columns.items():
+            mean_value = float(row[mean_key])
+            std_value = float(row[std_key])
+            min_value = float(row[min_key])
+            max_value = float(row[max_key])
+            if np.isnan(std_value) or np.isnan(min_value) or np.isnan(max_value):
+                continue
+
+            range_value = max_value - min_value
+            rules = HIGH_VARIANCE_RULES[metric_name]
+            std_threshold = max(rules["std_floor"], abs(mean_value) * 0.75)
+            range_threshold = max(rules["range_floor"], abs(mean_value) * 1.50)
+
+            if std_value > std_threshold:
+                warnings.append(
+                    RobustnessWarning(
+                        model_name=model_name,
+                        metric_name=metric_name,
+                        warning_type="high_variance",
+                        message=(
+                            f"WARNING: {model_name} shows high variance for {metric_name} "
+                            f"(std={std_value:.6f}, threshold={std_threshold:.6f})."
+                        ),
+                    )
+                )
+
+            if range_value > range_threshold:
+                warnings.append(
+                    RobustnessWarning(
+                        model_name=model_name,
+                        metric_name=metric_name,
+                        warning_type="instability",
+                        message=(
+                            f"WARNING: {model_name} shows instability for {metric_name} "
+                            f"(min={min_value:.6f}, max={max_value:.6f}, range={range_value:.6f})."
+                        ),
+                    )
+                )
+    return warnings
+
+
+def run_robustness_analysis(
+    config: ResolvedConfig,
+    *,
+    model_names: list[str] | None = None,
+    run_count: int | None = None,
+) -> RobustnessAnalysis:
+    """Execute repeated seeded runs and summarize model robustness."""
+    selected_model_names = model_names or ModelRegistry.available_models()
+    run_total = config.robustness_runs if run_count is None else run_count
+    if run_total <= 0:
+        raise ValueError("run_count must be a positive integer.")
+
+    rows: list[dict[str, float | int | str]] = []
+    for run_idx in range(run_total):
+        seed = config.synthetic_seed + run_idx
+        for model_name in selected_model_names:
+            artifacts = build_pipeline_artifacts(
+                config,
+                synthetic_seed=seed,
+                model_type_override=model_name,
+            )
+            metrics = summarize_run_metrics(artifacts)
+            rows.append(
+                {
+                    "run_id": run_idx + 1,
+                    "seed": seed,
+                    "model_name": model_name,
+                    "IC_mean": float(metrics["IC_mean"]),
+                    "RankIC_mean": float(metrics["RankIC_mean"]),
+                    "spread": float(metrics["spread"]),
+                }
+            )
+
+    per_run_metrics = pd.DataFrame(
+        rows,
+        columns=["run_id", "seed", "model_name", "IC_mean", "RankIC_mean", "spread"],
+    )
+    summary = build_robustness_summary(per_run_metrics)
+    warnings = interpret_robustness_summary(summary)
+    return RobustnessAnalysis(per_run_metrics=per_run_metrics, summary=summary, warnings=warnings)
