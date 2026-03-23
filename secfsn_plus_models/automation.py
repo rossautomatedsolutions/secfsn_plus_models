@@ -117,16 +117,100 @@ def generate_synthetic_feature_matrix(price_column: str) -> pd.DataFrame:
     periods = ["2020Q1", "2020Q2", "2020Q3", "2020Q4", "2021Q1", "2021Q2", "2021Q3"]
     index = pd.MultiIndex.from_product([ciks, periods], names=["cik", "period"])
     rng = np.random.default_rng(20240323)
-    regime_strength = np.array([0.40, 0.30, 0.0, 0.20, 0.18, 0.14], dtype=float)
-    period_linear_coefficients = rng.uniform(-0.0030, 0.0030, size=(len(periods) - 1, 5))
-    base_linear_coefficients = np.array([0.0125, -0.0080, 0.0090, 0.0065, -0.0055], dtype=float)
-    predictive_feature_masks = np.zeros((len(periods) - 1, 5), dtype=float)
-    signal_free_periods = {2}
-
-    for period_idx in range(len(periods) - 1):
-        predictive_count = int(rng.integers(3, 5))
-        predictive_columns = rng.choice(5, size=predictive_count, replace=False)
-        predictive_feature_masks[period_idx, predictive_columns] = 1.0
+    feature_names = [
+        "feature_growth",
+        "feature_value",
+        "feature_quality",
+        "feature_momentum",
+        "feature_stability",
+    ]
+    base_linear_coefficients = np.array([0.0055, -0.0070, 0.0095, 0.0040, 0.0065], dtype=float)
+    regime_templates = [
+        {
+            "active_columns": np.array([1, 0, 1, 0, 1], dtype=float),
+            "linear_shift": np.array([0.0080, 0.0000, 0.0065, 0.0000, 0.0030], dtype=float),
+            "interaction_pair": (0, 2),
+            "interaction_weight": 0.0048,
+            "piecewise_column": 0,
+            "piecewise_threshold": 0.18,
+            "piecewise_weight": 0.0042,
+            "quadratic_column": 4,
+            "quadratic_weight": 0.0018,
+            "signal_scale": 0.42,
+            "noise_scale_floor": 0.018,
+            "rank_mix": 0.20,
+        },
+        {
+            "active_columns": np.array([0, 0, 0, 1, 1], dtype=float),
+            "linear_shift": np.array([0.0000, 0.0000, 0.0000, 0.0105, 0.0040], dtype=float),
+            "interaction_pair": (3, 4),
+            "interaction_weight": 0.0038,
+            "piecewise_column": 3,
+            "piecewise_threshold": 0.10,
+            "piecewise_weight": 0.0045,
+            "quadratic_column": 1,
+            "quadratic_weight": -0.0014,
+            "signal_scale": 0.32,
+            "noise_scale_floor": 0.020,
+            "rank_mix": 0.22,
+        },
+        {
+            "active_columns": np.array([0, 1, 0, 0, 1], dtype=float),
+            "linear_shift": np.array([0.0000, -0.0035, 0.0000, 0.0000, 0.0025], dtype=float),
+            "interaction_pair": (1, 4),
+            "interaction_weight": 0.0016,
+            "piecewise_column": 4,
+            "piecewise_threshold": 0.05,
+            "piecewise_weight": 0.0014,
+            "quadratic_column": 2,
+            "quadratic_weight": 0.0008,
+            "signal_scale": 0.10,
+            "noise_scale_floor": 0.024,
+            "rank_mix": 0.32,
+        },
+        {
+            "active_columns": np.array([1, 1, 0, 1, 0], dtype=float),
+            "linear_shift": np.array([0.0045, -0.0060, 0.0000, 0.0050, 0.0000], dtype=float),
+            "interaction_pair": (0, 3),
+            "interaction_weight": 0.0030,
+            "piecewise_column": 1,
+            "piecewise_threshold": 0.08,
+            "piecewise_weight": -0.0030,
+            "quadratic_column": 0,
+            "quadratic_weight": 0.0014,
+            "signal_scale": 0.24,
+            "noise_scale_floor": 0.019,
+            "rank_mix": 0.24,
+        },
+        {
+            "active_columns": np.array([0, 0, 1, 1, 1], dtype=float),
+            "linear_shift": np.array([0.0000, 0.0000, 0.0055, 0.0050, 0.0040], dtype=float),
+            "interaction_pair": (2, 3),
+            "interaction_weight": 0.0032,
+            "piecewise_column": 2,
+            "piecewise_threshold": 0.16,
+            "piecewise_weight": 0.0024,
+            "quadratic_column": 3,
+            "quadratic_weight": 0.0012,
+            "signal_scale": 0.18,
+            "noise_scale_floor": 0.018,
+            "rank_mix": 0.18,
+        },
+        {
+            "active_columns": np.array([0, 1, 1, 0, 1], dtype=float),
+            "linear_shift": np.array([0.0000, -0.0030, 0.0050, 0.0000, 0.0055], dtype=float),
+            "interaction_pair": (2, 4),
+            "interaction_weight": 0.0028,
+            "piecewise_column": 1,
+            "piecewise_threshold": 0.04,
+            "piecewise_weight": 0.0022,
+            "quadratic_column": 4,
+            "quadratic_weight": 0.0016,
+            "signal_scale": 0.16,
+            "noise_scale_floor": 0.018,
+            "rank_mix": 0.16,
+        },
+    ]
 
     rows: list[dict[str, float | int]] = []
     row_positions: dict[tuple[str, str], int] = {}
@@ -194,47 +278,66 @@ def generate_synthetic_feature_matrix(price_column: str) -> pd.DataFrame:
             if period_idx == len(periods) - 1:
                 continue
 
-            feature_vector = np.array(
-                [
-                    rows[-1]["feature_growth"],
-                    rows[-1]["feature_value"],
-                    rows[-1]["feature_quality"],
-                    rows[-1]["feature_momentum"],
-                    rows[-1]["feature_stability"],
-                ],
-                dtype=float,
+            feature_vector = np.array([rows[-1][feature_name] for feature_name in feature_names], dtype=float)
+            regime = regime_templates[period_idx]
+            active_mask = regime["active_columns"].copy()
+            if float(rng.random()) < 0.40:
+                active_column = int(rng.integers(0, len(feature_names)))
+                active_mask[active_column] = 0.0
+            active_mask = np.where(active_mask.sum() == 0.0, regime["active_columns"], active_mask)
+
+            backbone_signal = float(np.dot(base_linear_coefficients, feature_vector))
+            regime_linear_signal = float(np.dot((regime["linear_shift"] * active_mask), feature_vector))
+
+            left_idx, right_idx = regime["interaction_pair"]
+            interaction_signal = float(
+                regime["interaction_weight"] * feature_vector[left_idx] * feature_vector[right_idx] * active_mask[left_idx] * active_mask[right_idx]
             )
 
-            coefficients = (base_linear_coefficients + period_linear_coefficients[period_idx]) * predictive_feature_masks[
-                period_idx
-            ]
-            linear_signal = float(np.dot(coefficients, feature_vector))
-            interaction_signal = 0.0035 * feature_vector[0] * feature_vector[2] - 0.0025 * feature_vector[1] * feature_vector[3]
-            nonlinear_signal = 0.0035 * np.tanh(feature_vector[3]) + 0.0020 * np.sign(feature_vector[1]) * (
-                feature_vector[4] ** 2
+            piecewise_idx = regime["piecewise_column"]
+            piecewise_input = feature_vector[piecewise_idx] - regime["piecewise_threshold"]
+            piecewise_signal = float(regime["piecewise_weight"] * max(piecewise_input, 0.0) * active_mask[piecewise_idx])
+
+            quadratic_idx = regime["quadratic_column"]
+            quadratic_signal = float(
+                regime["quadratic_weight"] * ((feature_vector[quadratic_idx] ** 2) - 0.5) * active_mask[quadratic_idx]
             )
-            latent_signal = regime_strength[period_idx] * (linear_signal + interaction_signal + nonlinear_signal)
-            if period_idx in signal_free_periods:
-                latent_signal = 0.0
+
+            nonlinear_backbone = 0.0022 * np.tanh(feature_vector[2]) - 0.0018 * np.tanh(feature_vector[1] * feature_vector[3])
+            latent_signal = backbone_signal + (regime["signal_scale"] * (regime_linear_signal + interaction_signal + piecewise_signal + quadratic_signal)) + nonlinear_backbone
             signal_by_period[period_idx].append(latent_signal)
 
     if signal_by_period:
         noisy_returns_by_period: dict[int, np.ndarray] = {}
         for period_idx, period_signal_list in signal_by_period.items():
             period_signal = np.array(period_signal_list, dtype=float)
-            signal_std = float(period_signal.std(ddof=0))
-            noise_floor = 0.018 if period_idx in signal_free_periods else 0.012
-            noise_scale = max(signal_std * float(rng.uniform(1.05, 1.45)), noise_floor)
-            noise = rng.normal(loc=0.0, scale=noise_scale, size=len(ciks))
-            period_returns = period_signal + noise
+            regime = regime_templates[period_idx]
+            centered_signal = period_signal - float(period_signal.mean())
+            signal_std = float(centered_signal.std(ddof=0))
+            noise_scale = max(signal_std * float(rng.uniform(1.25, 1.55)), regime["noise_scale_floor"])
+            heteroskedastic_scale = rng.uniform(0.85, 1.20, size=len(ciks))
+            noise = rng.normal(loc=0.0, scale=noise_scale * heteroskedastic_scale, size=len(ciks))
+            period_returns = centered_signal + noise
 
-            if len(ciks) > 1 and float(rng.random()) < 0.08:
-                shuffled_positions = rng.choice(len(ciks), size=2, replace=False)
-                shuffled_returns = period_returns.copy()
-                shuffled_returns[shuffled_positions] = period_returns[np.roll(shuffled_positions, 1)]
-                period_returns = shuffled_returns
+            if len(ciks) > 2:
+                ranks = np.argsort(np.argsort(period_returns))
+                rank_noise = rng.normal(loc=0.0, scale=regime["rank_mix"], size=len(ciks))
+                perturbed_rank = np.clip(ranks.astype(float) + rank_noise, 0.0, len(ciks) - 1.0)
+                order = np.argsort(perturbed_rank)
+                sorted_returns = np.sort(period_returns)
+                period_returns = np.empty_like(period_returns)
+                period_returns[order] = sorted_returns
 
-            noisy_returns_by_period[period_idx] = np.clip(period_returns, -0.18, 0.18)
+            if len(ciks) > 1 and float(rng.random()) < 0.55:
+                swap_positions = rng.choice(len(ciks), size=2, replace=False)
+                swap_weight = float(rng.uniform(0.25, 0.40))
+                mixed_returns = period_returns.copy()
+                a_idx, b_idx = int(swap_positions[0]), int(swap_positions[1])
+                mixed_returns[a_idx] = ((1.0 - swap_weight) * period_returns[a_idx]) + (swap_weight * period_returns[b_idx])
+                mixed_returns[b_idx] = ((1.0 - swap_weight) * period_returns[b_idx]) + (swap_weight * period_returns[a_idx])
+                period_returns = mixed_returns
+
+            noisy_returns_by_period[period_idx] = np.clip(period_returns * 1.30, -0.20, 0.20)
 
         for cik_idx, cik in enumerate(ciks):
             returns_by_cik[cik] = [
