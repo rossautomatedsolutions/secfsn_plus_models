@@ -31,6 +31,17 @@ def test_generate_synthetic_feature_matrix_returns_expected_index() -> None:
     assert len(features_df) > 0
 
 
+def test_generate_synthetic_feature_matrix_is_deterministic_and_centered() -> None:
+    first = generate_synthetic_feature_matrix(price_column="price")
+    second = generate_synthetic_feature_matrix(price_column="price")
+    labels = compute_next_period_return(first, "price")
+
+    pd.testing.assert_frame_equal(first, second)
+    assert first.shape == (42, 7)
+    assert abs(float(labels.mean())) < 0.02
+    assert float(labels.std()) > 0.015
+
+
 def test_validate_feature_matrix_assumptions_returns_numeric_coverage(synthetic_panel: pd.DataFrame) -> None:
     coverage = validate_feature_matrix_assumptions(synthetic_panel, "price")
 
