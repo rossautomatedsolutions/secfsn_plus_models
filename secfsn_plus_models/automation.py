@@ -117,14 +117,27 @@ def generate_synthetic_feature_matrix(price_column: str) -> pd.DataFrame:
     periods = ["2020Q1", "2020Q2", "2020Q3", "2020Q4", "2021Q1", "2021Q2", "2021Q3"]
     index = pd.MultiIndex.from_product([ciks, periods], names=["cik", "period"])
     rng = np.random.default_rng(20240323)
-    regime_strength = np.array([0.95, 0.55, 0.15, 0.0, 0.80, 0.30], dtype=float)
-    period_linear_coefficients = rng.uniform(-0.018, 0.018, size=(len(periods) - 1, 5))
-    base_linear_coefficients = np.array([0.028, -0.020, 0.024, 0.018, -0.014], dtype=float)
+    regime_strength = np.array([0.28, 0.16, 0.0, 0.0, 0.10, 0.05], dtype=float)
+    period_linear_coefficients = rng.uniform(-0.0045, 0.0045, size=(len(periods) - 1, 5))
+    base_linear_coefficients = np.array([0.0095, -0.0060, 0.0070, 0.0050, -0.0040], dtype=float)
+    predictive_feature_masks = np.zeros((len(periods) - 1, 5), dtype=float)
+    lagged_feature_slots = np.zeros((len(periods) - 1, 5), dtype=bool)
+    signal_free_periods = {2, 3, 5}
+
+    for period_idx in range(len(periods) - 1):
+        predictive_count = int(rng.integers(2, 4))
+        predictive_columns = rng.choice(5, size=predictive_count, replace=False)
+        predictive_feature_masks[period_idx, predictive_columns] = 1.0
+
+        lagged_count = int(rng.integers(1, 3))
+        lagged_columns = rng.choice(5, size=lagged_count, replace=False)
+        lagged_feature_slots[period_idx, lagged_columns] = True
 
     rows: list[dict[str, float | int]] = []
     row_positions: dict[tuple[str, str], int] = {}
     signal_by_period: dict[int, list[float]] = {period_idx: [] for period_idx in range(len(periods) - 1)}
     returns_by_cik: dict[str, list[float]] = {cik: [] for cik in ciks}
+    feature_history_by_cik: dict[str, list[np.ndarray]] = {cik: [] for cik in ciks}
 
     for cik_idx, cik in enumerate(ciks, start=1):
         sector_code = cik_idx % 3
@@ -197,21 +210,41 @@ def generate_synthetic_feature_matrix(price_column: str) -> pd.DataFrame:
                 ],
                 dtype=float,
             )
-            coefficients = base_linear_coefficients + period_linear_coefficients[period_idx]
-            linear_signal = float(np.dot(coefficients, feature_vector))
-            interaction_signal = 0.020 * feature_vector[0] * feature_vector[2] - 0.014 * feature_vector[1] * feature_vector[3]
-            nonlinear_signal = 0.018 * np.tanh(feature_vector[3]) + 0.012 * np.sign(feature_vector[1]) * (feature_vector[4] ** 2)
+            prior_feature_vector = feature_history_by_cik[cik][-1] if feature_history_by_cik[cik] else feature_vector
+            effective_feature_vector = feature_vector.copy()
+            effective_feature_vector[lagged_feature_slots[period_idx]] = prior_feature_vector[lagged_feature_slots[period_idx]]
+
+            coefficients = (base_linear_coefficients + period_linear_coefficients[period_idx]) * predictive_feature_masks[
+                period_idx
+            ]
+            linear_signal = float(np.dot(coefficients, effective_feature_vector))
+            interaction_signal = 0.0060 * effective_feature_vector[0] * effective_feature_vector[2] - 0.0040 * effective_feature_vector[1] * effective_feature_vector[3]
+            nonlinear_signal = 0.0050 * np.tanh(effective_feature_vector[3]) + 0.0035 * np.sign(
+                effective_feature_vector[1]
+            ) * (effective_feature_vector[4] ** 2)
             latent_signal = regime_strength[period_idx] * (linear_signal + interaction_signal + nonlinear_signal)
+            if period_idx in signal_free_periods:
+                latent_signal = 0.0
             signal_by_period[period_idx].append(latent_signal)
+            feature_history_by_cik[cik].append(feature_vector)
 
     if signal_by_period:
         noisy_returns_by_period: dict[int, np.ndarray] = {}
         for period_idx, period_signal_list in signal_by_period.items():
             period_signal = np.array(period_signal_list, dtype=float)
             signal_std = float(period_signal.std(ddof=0))
-            noise_scale = max(signal_std * float(rng.uniform(0.5, 1.5)), 0.018)
+            noise_scale = max(signal_std * float(rng.uniform(1.8, 2.6)), 0.024)
             noise = rng.normal(loc=0.0, scale=noise_scale, size=len(ciks))
-            noisy_returns_by_period[period_idx] = np.clip(period_signal + noise, -0.18, 0.18)
+            period_returns = period_signal + noise
+
+            if len(ciks) > 1 and float(rng.random()) < 0.5:
+                swap_count = 1
+                shuffled_positions = rng.choice(len(ciks), size=swap_count * 2, replace=False)
+                shuffled_returns = period_returns.copy()
+                shuffled_returns[shuffled_positions] = period_returns[np.roll(shuffled_positions, 1)]
+                period_returns = shuffled_returns
+
+            noisy_returns_by_period[period_idx] = np.clip(period_returns, -0.18, 0.18)
 
         for cik_idx, cik in enumerate(ciks):
             returns_by_cik[cik] = [
