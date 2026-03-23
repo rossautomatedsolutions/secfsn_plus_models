@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import math
 import traceback
+from dataclasses import replace
+
 import config
 
 
 LOW_VARIANCE_THRESHOLD = 1e-6
 UNUSUALLY_HIGH_IC_THRESHOLD = 0.2
+LARGE_SPREAD_VARIANCE_THRESHOLD = 0.03
+ROBUSTNESS_SEEDS = list(range(1, 11))
 COMPARISON_MODELS = ["linear_regression", "random_forest"]
 COMPARISON_COLUMNS = [
     "model_name",
@@ -19,6 +23,15 @@ COMPARISON_COLUMNS = [
     "top_decile_return",
     "bottom_decile_return",
     "spread",
+]
+ROBUSTNESS_DISPLAY_COLUMNS = [
+    "model_name",
+    "IC_mean_avg",
+    "IC_std",
+    "IC_min",
+    "IC_max",
+    "RankIC_avg",
+    "spread_avg",
 ]
 
 
@@ -185,6 +198,80 @@ def _print_model_section(model_name, demo) -> None:
     print()
 
 
+def _run_seeded_robustness_analysis(runtime_config, model_names):
+    from secfsn_plus_models.automation import build_robustness_summary, run_robustness_analysis
+
+    robustness_config = replace(
+        runtime_config,
+        feature_matrix_path=None,
+        synthetic_seed=ROBUSTNESS_SEEDS[0],
+        robustness_runs=len(ROBUSTNESS_SEEDS),
+    )
+    robustness = run_robustness_analysis(
+        robustness_config,
+        model_names=model_names,
+        run_count=len(ROBUSTNESS_SEEDS),
+    )
+    per_run_metrics = robustness.per_run_metrics.loc[
+        robustness.per_run_metrics["seed"].isin(ROBUSTNESS_SEEDS)
+    ].copy()
+    per_run_metrics.loc[:, "run_id"] = per_run_metrics["seed"]
+    summary = build_robustness_summary(per_run_metrics).rename(
+        columns={
+            "IC_mean": "IC_mean_avg",
+            "RankIC_mean": "RankIC_mean_avg",
+            "spread_mean": "spread_avg",
+        }
+    )
+    summary = summary.rename(columns={"RankIC_mean_avg": "RankIC_avg"})
+    return per_run_metrics, summary
+
+
+def _build_robustness_flags(summary):
+    import pandas as pd
+
+    warnings: list[str] = []
+    for row in summary.to_dict(orient="records"):
+        model_name = str(row["model_name"])
+        ic_mean_avg = float(row["IC_mean_avg"])
+        ic_std = float(row["IC_std"])
+        ic_min = float(row["IC_min"])
+        spread_avg = float(row["spread_avg"])
+        spread_std = float(row["spread_std"])
+
+        if pd.notna(ic_std) and pd.notna(ic_mean_avg) and ic_std > ic_mean_avg:
+            warnings.append(f"WARNING: {model_name} unstable signal (IC_std > IC_mean_avg).")
+        if pd.notna(ic_min) and ic_min < 0:
+            warnings.append(f"WARNING: {model_name} inconsistent direction (IC_min < 0).")
+        if pd.notna(spread_std) and spread_std > max(abs(spread_avg), LARGE_SPREAD_VARIANCE_THRESHOLD):
+            warnings.append(f"WARNING: {model_name} unstable ranking (large spread variance).")
+    return warnings
+
+
+def _print_robustness_section(runtime_config, model_names) -> None:
+    _, summary = _run_seeded_robustness_analysis(runtime_config, model_names)
+
+    structured_step("ROBUSTNESS ANALYSIS")
+    _print_kv("dataset_source", "regenerated synthetic dataset for each seed")
+    _print_kv("seeds", ", ".join(str(seed) for seed in ROBUSTNESS_SEEDS))
+    print(
+        summary.loc[:, ROBUSTNESS_DISPLAY_COLUMNS].to_string(
+            index=False,
+            formatters={column: _format_scalar for column in ROBUSTNESS_DISPLAY_COLUMNS[1:]},
+        )
+    )
+    print()
+
+    structured_step("ROBUSTNESS FLAGS")
+    warnings = _build_robustness_flags(summary)
+    if warnings:
+        for warning in warnings:
+            print(warning)
+    else:
+        print("No robustness warnings triggered.")
+    print()
+
+
 def main() -> int:
     try:
         import pandas as pd
@@ -230,6 +317,9 @@ def main() -> int:
                 formatters={column: _format_scalar for column in COMPARISON_COLUMNS[1:]},
             )
         )
+        print()
+
+        _print_robustness_section(runtime_config, list(demos))
         return 0
     except Exception as exc:  # noqa: BLE001 - CLI should fail fast with a clear terminal error.
         structured_step("RESEARCH DIAGNOSTICS FAILED")
