@@ -4,10 +4,14 @@ import pandas as pd
 import pytest
 
 from secfsn_plus_models.automation import (
+    build_robustness_summary,
     build_pipeline_artifacts,
     generate_synthetic_feature_matrix,
+    interpret_robustness_summary,
     resolve_train_end_period,
+    run_robustness_analysis,
     run_diagnostics,
+    summarize_run_metrics,
     validate_feature_matrix_assumptions,
     validate_label_generation,
 )
@@ -20,6 +24,8 @@ class _Config:
     model_type = "linear_regression"
     test_size = None
     feature_matrix_path = None
+    synthetic_seed = 20240323
+    robustness_runs = 4
 
 
 def test_generate_synthetic_feature_matrix_returns_expected_index() -> None:
@@ -32,14 +38,22 @@ def test_generate_synthetic_feature_matrix_returns_expected_index() -> None:
 
 
 def test_generate_synthetic_feature_matrix_is_deterministic_and_centered() -> None:
-    first = generate_synthetic_feature_matrix(price_column="price")
-    second = generate_synthetic_feature_matrix(price_column="price")
+    first = generate_synthetic_feature_matrix(price_column="price", seed=20240323)
+    second = generate_synthetic_feature_matrix(price_column="price", seed=20240323)
     labels = compute_next_period_return(first, "price")
 
     pd.testing.assert_frame_equal(first, second)
     assert first.shape == (42, 7)
     assert abs(float(labels.mean())) < 0.02
     assert float(labels.std()) > 0.015
+
+
+def test_generate_synthetic_feature_matrix_changes_with_seed() -> None:
+    baseline = generate_synthetic_feature_matrix(price_column="price", seed=20240323)
+    shifted = generate_synthetic_feature_matrix(price_column="price", seed=20240324)
+
+    assert baseline.shape == shifted.shape
+    assert not baseline.equals(shifted)
 
 
 def test_validate_feature_matrix_assumptions_returns_numeric_coverage(synthetic_panel: pd.DataFrame) -> None:
@@ -88,3 +102,51 @@ def test_synthetic_pipeline_ic_mean_stays_in_target_signal_range() -> None:
 
     assert 0.03 <= ic_mean <= 0.08
     assert 0.05 <= rank_ic_mean <= 0.12
+
+
+def test_summarize_run_metrics_returns_expected_fields() -> None:
+    artifacts = build_pipeline_artifacts(_Config())
+
+    summary = summarize_run_metrics(artifacts)
+
+    assert summary.index.tolist() == ["IC_mean", "RankIC_mean", "spread"]
+    assert pd.notna(summary["spread"])
+
+
+def test_run_robustness_analysis_collects_runs_and_summary() -> None:
+    analysis = run_robustness_analysis(_Config(), model_names=["linear_regression", "random_forest"], run_count=3)
+
+    assert len(analysis.per_run_metrics) == 6
+    assert set(analysis.per_run_metrics["seed"]) == {20240323, 20240324, 20240325}
+    assert set(analysis.summary["model_name"]) == {"linear_regression", "random_forest"}
+    assert {
+        "IC_mean",
+        "IC_std",
+        "IC_min",
+        "IC_max",
+        "RankIC_mean",
+        "RankIC_std",
+        "RankIC_min",
+        "RankIC_max",
+        "spread_mean",
+        "spread_std",
+        "spread_min",
+        "spread_max",
+    }.issubset(set(analysis.summary.columns))
+
+
+def test_interpret_robustness_summary_flags_large_ranges() -> None:
+    summary = build_robustness_summary(
+        pd.DataFrame(
+            [
+                {"run_id": 1, "seed": 1, "model_name": "linear_regression", "IC_mean": 0.02, "RankIC_mean": 0.03, "spread": 0.01},
+                {"run_id": 2, "seed": 2, "model_name": "linear_regression", "IC_mean": 0.28, "RankIC_mean": 0.35, "spread": 0.18},
+                {"run_id": 3, "seed": 3, "model_name": "linear_regression", "IC_mean": -0.01, "RankIC_mean": -0.02, "spread": -0.02},
+            ]
+        )
+    )
+
+    warnings = interpret_robustness_summary(summary)
+
+    assert warnings
+    assert any(warning.warning_type == "instability" for warning in warnings)

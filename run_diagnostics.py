@@ -18,7 +18,11 @@ def main() -> int:
         runtime_config = resolve_runtime_config(config)
 
         structured_step("LOAD FEATURE MATRIX")
-        _, source_message = load_feature_matrix(runtime_config.price_column, runtime_config.feature_matrix_path)
+        _, source_message = load_feature_matrix(
+            runtime_config.price_column,
+            runtime_config.feature_matrix_path,
+            synthetic_seed=runtime_config.synthetic_seed,
+        )
         print("status: success")
         print(f"dataset_source: {source_message}")
 

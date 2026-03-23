@@ -14,3 +14,9 @@ test_size = None
 # Optional real dataset path. Supported formats are CSV, Parquet, and Pickle. When this remains
 # ``None`` or the file does not exist, the CLI scripts automatically generate a synthetic dataset.
 feature_matrix_path = None
+
+# Synthetic-data robustness settings. When the feature matrix falls back to the built-in synthetic
+# generator, ``synthetic_seed`` is the first seed used and ``robustness_runs`` controls how many
+# seeded reruns are executed for robustness analysis.
+synthetic_seed = 20240323
+robustness_runs = 10
