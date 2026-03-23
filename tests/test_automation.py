@@ -70,10 +70,10 @@ def test_run_diagnostics_returns_clean_report() -> None:
     assert report.test_rows > 0
 
 
-def test_synthetic_pipeline_ic_mean_stays_in_realistic_range() -> None:
+def test_synthetic_pipeline_ic_mean_stays_in_target_signal_range() -> None:
     artifacts = build_pipeline_artifacts(_Config())
     ic_mean = float(artifacts.ic_by_period.mean())
     rank_ic_mean = float(artifacts.rank_ic_by_period.mean())
 
-    assert 0.02 <= ic_mean <= 0.10
-    assert 0.03 <= rank_ic_mean <= 0.15
+    assert 0.03 <= ic_mean <= 0.08
+    assert 0.05 <= rank_ic_mean <= 0.12
