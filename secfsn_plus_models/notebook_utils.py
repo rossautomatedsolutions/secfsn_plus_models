@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from .automation import PipelineArtifacts, ResolvedConfig, build_pipeline_artifacts, load_feature_matrix
-from .evaluation import decile_spread, evaluate_cross_sectional_model
+from .evaluation import decile_return_summary, decile_spread, evaluate_cross_sectional_model
 from .metrics import information_coefficient, rank_information_coefficient
 from .models.registry import ModelRegistry
 from .splits import time_based_split
@@ -37,6 +37,48 @@ class NotebookDemoArtifacts:
 
 
 DEFAULT_NOTEBOOK_MODELS = ["linear_regression", "random_forest"]
+COMPARISON_METRIC_COLUMNS = [
+    "IC_mean",
+    "RankIC_mean",
+    "prediction_mean",
+    "prediction_std",
+    "top_decile_return",
+    "bottom_decile_return",
+    "spread",
+]
+
+
+def summarize_model_comparison_metrics(
+    model_name: str,
+    y_true: pd.Series,
+    y_pred: pd.Series,
+    *,
+    ic_by_period: pd.Series | None = None,
+    rank_ic_by_period: pd.Series | None = None,
+) -> pd.Series:
+    """Return compact comparison metrics for one model run."""
+    ic_by_period = information_coefficient(y_true, y_pred) if ic_by_period is None else ic_by_period.copy()
+    rank_ic_by_period = (
+        rank_information_coefficient(y_true, y_pred) if rank_ic_by_period is None else rank_ic_by_period.copy()
+    )
+    decile_summary = decile_return_summary(y_true, y_pred)
+    prediction_values = y_pred.dropna()
+
+    summary = pd.Series(
+        {
+            "model_name": model_name,
+            "IC_mean": float(ic_by_period.mean()) if not ic_by_period.empty else float("nan"),
+            "RankIC_mean": float(rank_ic_by_period.mean()) if not rank_ic_by_period.empty else float("nan"),
+            "prediction_mean": float(prediction_values.mean()) if not prediction_values.empty else float("nan"),
+            "prediction_std": float(prediction_values.std(ddof=1)) if len(prediction_values) > 1 else float("nan"),
+            "top_decile_return": float(decile_summary["top_decile_return"]),
+            "bottom_decile_return": float(decile_summary["bottom_decile_return"]),
+            "spread": float(decile_summary["spread"]),
+        },
+        dtype="object",
+        name=model_name,
+    )
+    return summary
 
 
 def load_notebook_demo_artifacts(
@@ -161,19 +203,23 @@ def compare_model_runs(
     for model_name in model_names:
         model = ModelRegistry.create(model_name, **model_params.get(model_name, {}))
         predictions = train_and_predict(model, X_train, y_train, X_test)
-        evaluation_summary = evaluate_cross_sectional_model(y_test, predictions)
-        rows.append(
+        row = summarize_model_comparison_metrics(model_name, y_test, predictions).to_dict()
+        row.update(
             {
-                "model_name": model_name,
                 "train_rows": len(X_train),
                 "test_rows": len(X_test),
-                "IC": float(evaluation_summary["IC"]),
-                "RankIC": float(evaluation_summary["RankIC"]),
-                "DecileSpread": float(evaluation_summary["DecileSpread"]),
+                "IC": row["IC_mean"],
+                "RankIC": row["RankIC_mean"],
+                "DecileSpread": row["spread"],
             }
         )
+        rows.append(row)
 
-    return pd.DataFrame(rows).sort_values(by=["RankIC", "IC"], ascending=False).reset_index(drop=True)
+    comparison = pd.DataFrame(rows)
+    return comparison.sort_values(
+        by=["RankIC_mean", "IC_mean", "model_name"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
 
 
 def summarize_period_metrics(y_true: pd.Series, y_pred: pd.Series) -> pd.DataFrame:
