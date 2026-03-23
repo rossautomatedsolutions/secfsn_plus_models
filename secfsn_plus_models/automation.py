@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from .dataset import build_model_dataset
@@ -111,26 +112,119 @@ def resolve_runtime_config(config_module: Any) -> ResolvedConfig:
 
 
 def generate_synthetic_feature_matrix(price_column: str) -> pd.DataFrame:
-    """Create a deterministic MultiIndex feature matrix that always supports the CLI flows."""
+    """Create a deterministic-but-noisy synthetic panel with modest predictive structure."""
     ciks = [f"{idx:04d}" for idx in range(1, 7)]
     periods = ["2020Q1", "2020Q2", "2020Q3", "2020Q4", "2021Q1", "2021Q2", "2021Q3"]
     index = pd.MultiIndex.from_product([ciks, periods], names=["cik", "period"])
+    rng = np.random.default_rng(20240323)
+    regime_strength = np.array([0.95, 0.55, 0.15, 0.0, 0.80, 0.30], dtype=float)
+    period_linear_coefficients = rng.uniform(-0.018, 0.018, size=(len(periods) - 1, 5))
+    base_linear_coefficients = np.array([0.028, -0.020, 0.024, 0.018, -0.014], dtype=float)
 
     rows: list[dict[str, float | int]] = []
-    for cik_idx, _cik in enumerate(ciks, start=1):
-        base_price = 75.0 + (18.0 * cik_idx)
-        for period_idx, _period in enumerate(periods, start=1):
+    row_positions: dict[tuple[str, str], int] = {}
+    signal_by_period: dict[int, list[float]] = {period_idx: [] for period_idx in range(len(periods) - 1)}
+    returns_by_cik: dict[str, list[float]] = {cik: [] for cik in ciks}
+
+    for cik_idx, cik in enumerate(ciks, start=1):
+        sector_code = cik_idx % 3
+        sector_tilt = (sector_code - 1) * 0.12
+        value_anchor = rng.normal(loc=-0.10 + (0.08 * cik_idx), scale=0.28)
+        quality_anchor = rng.normal(loc=0.06 * (cik_idx - 3), scale=0.22)
+        momentum_state = rng.normal(loc=0.0, scale=0.35)
+        stability_anchor = rng.normal(loc=0.10 * (cik_idx - 3), scale=0.18)
+
+        for period_idx, period in enumerate(periods):
+            time_drift = (period_idx - ((len(periods) - 1) / 2.0)) / len(periods)
+            cyclical_component = float(np.sin((period_idx + 1) * 0.85 + (0.30 * cik_idx)))
+
+            value_anchor = (0.88 * value_anchor) + rng.normal(scale=0.18)
+            quality_anchor = (0.82 * quality_anchor) + rng.normal(scale=0.16)
+            momentum_state = (0.58 * momentum_state) + rng.normal(scale=0.34)
+            stability_anchor = (0.90 * stability_anchor) + rng.normal(scale=0.08)
+
+            feature_growth = (
+                0.25 * momentum_state
+                + 0.16 * quality_anchor
+                + 0.12 * cyclical_component
+                + 0.08 * time_drift
+                + rng.normal(scale=0.34)
+            )
+            feature_value = value_anchor + (0.18 * sector_tilt) + (0.08 * time_drift) + rng.normal(scale=0.42)
+            feature_quality = (
+                0.44 * quality_anchor
+                + 0.18 * value_anchor
+                + 0.12 * cyclical_component
+                + rng.normal(scale=0.30)
+            )
+            feature_momentum = (
+                0.52 * momentum_state
+                + 0.10 * time_drift
+                + 0.10 * sector_tilt
+                + rng.normal(scale=0.38)
+            )
+            feature_stability = (
+                stability_anchor
+                - (0.12 * abs(momentum_state))
+                + 0.12 * quality_anchor
+                + rng.normal(scale=0.20)
+            )
+
+            noisy_mix = rng.normal(scale=0.18)
             rows.append(
                 {
-                    price_column: base_price + (4.5 * period_idx) + (1.25 * cik_idx * period_idx),
-                    "feature_growth": float(period_idx),
-                    "feature_value": float(cik_idx),
-                    "feature_quality": float((cik_idx * period_idx) / 3.0),
-                    "feature_momentum": float((period_idx**2) - cik_idx),
-                    "feature_stability": float(cik_idx + (period_idx / 10.0)),
-                    "sector_code": cik_idx % 3,
+                    price_column: np.nan,
+                    "feature_growth": float(feature_growth + noisy_mix),
+                    "feature_value": float((0.82 * feature_value) + (0.18 * rng.normal())),
+                    "feature_quality": float((0.88 * feature_quality) + (0.12 * rng.normal())),
+                    "feature_momentum": float((0.78 * feature_momentum) + (0.22 * rng.normal())),
+                    "feature_stability": float((0.86 * feature_stability) + (0.14 * rng.normal())),
+                    "sector_code": sector_code,
                 }
             )
+            row_positions[(cik, period)] = len(rows) - 1
+
+            if period_idx == len(periods) - 1:
+                continue
+
+            feature_vector = np.array(
+                [
+                    rows[-1]["feature_growth"],
+                    rows[-1]["feature_value"],
+                    rows[-1]["feature_quality"],
+                    rows[-1]["feature_momentum"],
+                    rows[-1]["feature_stability"],
+                ],
+                dtype=float,
+            )
+            coefficients = base_linear_coefficients + period_linear_coefficients[period_idx]
+            linear_signal = float(np.dot(coefficients, feature_vector))
+            interaction_signal = 0.020 * feature_vector[0] * feature_vector[2] - 0.014 * feature_vector[1] * feature_vector[3]
+            nonlinear_signal = 0.018 * np.tanh(feature_vector[3]) + 0.012 * np.sign(feature_vector[1]) * (feature_vector[4] ** 2)
+            latent_signal = regime_strength[period_idx] * (linear_signal + interaction_signal + nonlinear_signal)
+            signal_by_period[period_idx].append(latent_signal)
+
+    if signal_by_period:
+        noisy_returns_by_period: dict[int, np.ndarray] = {}
+        for period_idx, period_signal_list in signal_by_period.items():
+            period_signal = np.array(period_signal_list, dtype=float)
+            signal_std = float(period_signal.std(ddof=0))
+            noise_scale = max(signal_std * float(rng.uniform(0.5, 1.5)), 0.018)
+            noise = rng.normal(loc=0.0, scale=noise_scale, size=len(ciks))
+            noisy_returns_by_period[period_idx] = np.clip(period_signal + noise, -0.18, 0.18)
+
+        for cik_idx, cik in enumerate(ciks):
+            returns_by_cik[cik] = [
+                float(noisy_returns_by_period[period_idx][cik_idx]) for period_idx in range(len(periods) - 1)
+            ]
+
+    for cik_idx, cik in enumerate(ciks, start=1):
+        price = 82.0 + (13.0 * cik_idx) + float(rng.normal(scale=4.0))
+        for period_idx, period in enumerate(periods):
+            rows[row_positions[(cik, period)]][price_column] = float(max(price, 5.0))
+            if period_idx < len(periods) - 1:
+                realized_return = returns_by_cik[cik][period_idx]
+                price *= 1.0 + realized_return
 
     return pd.DataFrame(rows, index=index).sort_index()
 
