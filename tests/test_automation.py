@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from secfsn_plus_models.automation import (
+    build_pipeline_artifacts,
     generate_synthetic_feature_matrix,
     resolve_train_end_period,
     run_diagnostics,
@@ -67,3 +68,10 @@ def test_run_diagnostics_returns_clean_report() -> None:
     assert report.split_overlap_count == 0
     assert report.train_rows > 0
     assert report.test_rows > 0
+
+
+def test_synthetic_pipeline_ic_mean_stays_in_realistic_range() -> None:
+    artifacts = build_pipeline_artifacts(_Config())
+    ic_mean = float(artifacts.ic_by_period.mean())
+
+    assert 0.02 <= ic_mean <= 0.15
