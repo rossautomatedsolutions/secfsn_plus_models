@@ -7,6 +7,7 @@ from secfsn_plus_models.notebook_utils import (
     compare_model_runs,
     load_notebook_demo_artifacts,
     preview_aligned_dataset,
+    summarize_model_comparison_metrics,
     summarize_dataset,
     summarize_period_coverage,
     summarize_period_metrics,
@@ -46,9 +47,46 @@ def test_compare_model_runs_and_split_summary_return_expected_columns(synthetic_
     split_summary = summarize_split_artifacts(demo.pipeline)
 
     assert set(comparison["model_name"]) == {"linear_regression", "random_forest"}
-    assert set(["IC", "RankIC", "DecileSpread"]).issubset(comparison.columns)
+    assert set(
+        [
+            "IC",
+            "RankIC",
+            "DecileSpread",
+            "IC_mean",
+            "RankIC_mean",
+            "prediction_mean",
+            "prediction_std",
+            "top_decile_return",
+            "bottom_decile_return",
+            "spread",
+        ]
+    ).issubset(comparison.columns)
     assert split_summary.loc["split", "train_rows"] == len(demo.pipeline.X_train)
     assert split_summary.loc["split", "test_rows"] == len(demo.pipeline.X_test)
+
+
+def test_summarize_model_comparison_metrics_returns_requested_fields() -> None:
+    demo = load_notebook_demo_artifacts(model_type="linear_regression", train_end_period="2020Q4")
+
+    summary = summarize_model_comparison_metrics(
+        "linear_regression",
+        demo.pipeline.y_test,
+        demo.pipeline.predictions,
+        ic_by_period=demo.pipeline.ic_by_period,
+        rank_ic_by_period=demo.pipeline.rank_ic_by_period,
+    )
+
+    assert summary["model_name"] == "linear_regression"
+    assert summary.index.tolist() == [
+        "model_name",
+        "IC_mean",
+        "RankIC_mean",
+        "prediction_mean",
+        "prediction_std",
+        "top_decile_return",
+        "bottom_decile_return",
+        "spread",
+    ]
 
 
 def test_prediction_evaluation_helpers_add_rank_columns(synthetic_panel) -> None:

@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import math
 import traceback
-
 import config
 
 
 LOW_VARIANCE_THRESHOLD = 1e-6
 UNUSUALLY_HIGH_IC_THRESHOLD = 0.2
+COMPARISON_MODELS = ["linear_regression", "random_forest"]
+COMPARISON_COLUMNS = [
+    "model_name",
+    "IC_mean",
+    "RankIC_mean",
+    "prediction_mean",
+    "prediction_std",
+    "top_decile_return",
+    "bottom_decile_return",
+    "spread",
+]
 
 
 def structured_step(title: str) -> None:
@@ -63,14 +73,14 @@ def _build_decile_table(y_true, y_pred):
 
     frame = pd.DataFrame({"actual_return": y_true, "prediction": y_pred}).dropna()
     if frame.empty:
-        return frame, float("nan"), float("nan"), float("nan")
+        return frame
 
     ranked_predictions = frame["prediction"].rank(method="first")
     frame["decile"] = pd.qcut(ranked_predictions, q=10, labels=range(1, 11), duplicates="drop")
     frame = frame.dropna(subset=["decile"]).copy()
     frame["decile"] = frame["decile"].astype(int)
 
-    decile_table = (
+    return (
         frame.groupby("decile", sort=True)
         .agg(
             observation_count=("actual_return", "size"),
@@ -80,13 +90,99 @@ def _build_decile_table(y_true, y_pred):
         .sort_index()
     )
 
-    if decile_table.empty:
-        return decile_table, float("nan"), float("nan"), float("nan")
 
-    top_decile = float(decile_table.iloc[-1]["average_return"])
-    bottom_decile = float(decile_table.iloc[0]["average_return"])
-    spread = top_decile - bottom_decile
-    return decile_table, top_decile, bottom_decile, spread
+def _load_model_demos(runtime_config):
+    from secfsn_plus_models.notebook_utils import load_notebook_demo_artifacts
+
+    model_names = []
+    for model_name in [runtime_config.model_type, *COMPARISON_MODELS]:
+        if model_name not in model_names:
+            model_names.append(model_name)
+
+    demos = {}
+    for model_name in model_names:
+        demos[model_name] = load_notebook_demo_artifacts(
+            price_column=runtime_config.price_column,
+            train_end_period=runtime_config.train_end_period,
+            model_type=model_name,
+            test_size=runtime_config.test_size,
+            feature_matrix_path=runtime_config.feature_matrix_path,
+        )
+    return demos
+
+
+def _build_model_summary(model_name, demo):
+    from secfsn_plus_models.notebook_utils import summarize_model_comparison_metrics
+
+    summary = summarize_model_comparison_metrics(
+        model_name,
+        demo.pipeline.y_test,
+        demo.pipeline.predictions,
+        ic_by_period=demo.pipeline.ic_by_period,
+        rank_ic_by_period=demo.pipeline.rank_ic_by_period,
+    )
+    return summary.reindex(COMPARISON_COLUMNS)
+
+
+def _print_model_section(model_name, demo) -> None:
+    import pandas as pd
+
+    structured_step(f"MODEL PERFORMANCE [{model_name}]")
+    summary = _build_model_summary(model_name, demo)
+    for key in COMPARISON_COLUMNS[1:]:
+        _print_kv(key, summary[key])
+    print("IC_by_period:")
+    print(demo.pipeline.ic_by_period.to_string() if not demo.pipeline.ic_by_period.empty else "no valid IC values")
+    print("RankIC_by_period:")
+    print(
+        demo.pipeline.rank_ic_by_period.to_string()
+        if not demo.pipeline.rank_ic_by_period.empty
+        else "no valid RankIC values"
+    )
+    print()
+
+    structured_step(f"DECILE ANALYSIS [{model_name}]")
+    decile_table = _build_decile_table(demo.pipeline.y_test, demo.pipeline.predictions)
+    print("decile_table:")
+    print(decile_table.to_string() if not decile_table.empty else "no valid decile rows")
+    _print_kv("top_decile_return", summary["top_decile_return"])
+    _print_kv("bottom_decile_return", summary["bottom_decile_return"])
+    _print_kv("spread", summary["spread"])
+    print()
+
+    structured_step(f"PREDICTION STATS [{model_name}]")
+    prediction_stats = _series_stats(demo.pipeline.predictions)
+    _print_kv("prediction_mean", prediction_stats["mean"])
+    _print_kv("prediction_std", prediction_stats["std"])
+    _print_kv("prediction_min", prediction_stats["min"])
+    _print_kv("prediction_max", prediction_stats["max"])
+    print()
+
+    structured_step(f"SANITY FLAGS [{model_name}]")
+    warnings: list[str] = []
+    if pd.notna(summary["IC_mean"]) and float(summary["IC_mean"]) > UNUSUALLY_HIGH_IC_THRESHOLD:
+        warnings.append("WARNING: unusually high IC")
+
+    label_stats = _series_stats(demo.y)
+    if pd.notna(label_stats["std"]) and label_stats["std"] < LOW_VARIANCE_THRESHOLD:
+        warnings.append("WARNING: low variance")
+
+    nan_checks = {
+        "X_has_nans": bool(demo.X.isna().any().any()),
+        "y_has_nans": bool(demo.y.isna().any()),
+        "predictions_have_nans": bool(demo.pipeline.predictions.isna().any()),
+    }
+    for key, value in nan_checks.items():
+        _print_kv(key, value)
+    if any(nan_checks.values()):
+        warnings.append("WARNING: NaNs detected")
+
+    if warnings:
+        for warning in warnings:
+            print(warning)
+    else:
+        print("No sanity warnings triggered.")
+    print()
 
 
 def main() -> int:
@@ -94,95 +190,46 @@ def main() -> int:
         import pandas as pd
 
         from secfsn_plus_models.automation import resolve_runtime_config
-        from secfsn_plus_models.notebook_utils import load_notebook_demo_artifacts
 
         runtime_config = resolve_runtime_config(config)
+        demos = _load_model_demos(runtime_config)
+        baseline_demo = demos[runtime_config.model_type]
 
         structured_step("LOAD DATA")
-        demo = load_notebook_demo_artifacts(
-            price_column=runtime_config.price_column,
-            train_end_period=runtime_config.train_end_period,
-            model_type=runtime_config.model_type,
-            test_size=runtime_config.test_size,
-            feature_matrix_path=runtime_config.feature_matrix_path,
-        )
-        X = demo.X
-        y = demo.y
-        predictions = demo.pipeline.predictions
-        y_test = demo.pipeline.y_test
-
         _print_kv("status", "success")
-        _print_kv("dataset_source", demo.dataset_source)
-        _print_kv("X_shape", X.shape)
-        _print_kv("y_rows", len(y))
-        _print_kv("prediction_rows", len(predictions))
+        _print_kv("dataset_source", baseline_demo.dataset_source)
+        _print_kv("models_evaluated", ", ".join(demos))
+        _print_kv("X_shape", baseline_demo.X.shape)
+        _print_kv("y_rows", len(baseline_demo.y))
+        _print_kv("prediction_rows", len(baseline_demo.pipeline.predictions))
         print()
 
         structured_step("DATASET SUMMARY")
-        _print_kv("row_count", len(X))
-        _print_kv("feature_count", len(X.columns))
-        _print_kv("unique_cik_count", int(X.index.get_level_values("cik").nunique()))
-        _print_kv("unique_period_count", int(X.index.get_level_values("period").nunique()))
+        _print_kv("row_count", len(baseline_demo.X))
+        _print_kv("feature_count", len(baseline_demo.X.columns))
+        _print_kv("unique_cik_count", int(baseline_demo.X.index.get_level_values("cik").nunique()))
+        _print_kv("unique_period_count", int(baseline_demo.X.index.get_level_values("period").nunique()))
         print()
 
         structured_step("LABEL STATS")
-        label_stats = _series_stats(y)
+        label_stats = _series_stats(baseline_demo.y)
         for key, value in label_stats.items():
             _print_kv(key, value)
         print()
 
-        structured_step("MODEL PERFORMANCE")
-        ic_by_period = demo.pipeline.ic_by_period
-        rank_ic_by_period = demo.pipeline.rank_ic_by_period
-        ic_mean = float(ic_by_period.mean()) if not ic_by_period.empty else float("nan")
-        rank_ic_mean = float(rank_ic_by_period.mean()) if not rank_ic_by_period.empty else float("nan")
-        _print_kv("IC_mean", ic_mean)
-        _print_kv("RankIC_mean", rank_ic_mean)
-        print("IC_by_period:")
-        print(ic_by_period.to_string() if not ic_by_period.empty else "no valid IC values")
-        print("RankIC_by_period:")
-        print(rank_ic_by_period.to_string() if not rank_ic_by_period.empty else "no valid RankIC values")
-        print()
+        comparison_rows = []
+        for model_name, demo in demos.items():
+            _print_model_section(model_name, demo)
+            comparison_rows.append(_build_model_summary(model_name, demo).to_dict())
 
-        structured_step("DECILE ANALYSIS")
-        decile_table, top_decile_return, bottom_decile_return, spread = _build_decile_table(y_test, predictions)
-        print("decile_table:")
-        print(decile_table.to_string() if not decile_table.empty else "no valid decile rows")
-        _print_kv("top_decile_return", top_decile_return)
-        _print_kv("bottom_decile_return", bottom_decile_return)
-        _print_kv("spread", spread)
-        print()
-
-        structured_step("PREDICTION STATS")
-        prediction_stats = _series_stats(predictions)
-        _print_kv("prediction_mean", prediction_stats["mean"])
-        _print_kv("prediction_std", prediction_stats["std"])
-        _print_kv("prediction_min", prediction_stats["min"])
-        _print_kv("prediction_max", prediction_stats["max"])
-        print()
-
-        structured_step("SANITY FLAGS")
-        warnings: list[str] = []
-        if pd.notna(ic_mean) and ic_mean > UNUSUALLY_HIGH_IC_THRESHOLD:
-            warnings.append("WARNING: unusually high IC")
-        if pd.notna(label_stats["std"]) and label_stats["std"] < LOW_VARIANCE_THRESHOLD:
-            warnings.append("WARNING: low variance")
-
-        nan_checks = {
-            "X_has_nans": bool(X.isna().any().any()),
-            "y_has_nans": bool(y.isna().any()),
-            "predictions_have_nans": bool(predictions.isna().any()),
-        }
-        for key, value in nan_checks.items():
-            _print_kv(key, value)
-        if any(nan_checks.values()):
-            warnings.append("WARNING: NaNs detected")
-
-        if warnings:
-            for warning in warnings:
-                print(warning)
-        else:
-            print("No sanity warnings triggered.")
+        structured_step("MODEL COMPARISON")
+        comparison = pd.DataFrame(comparison_rows, columns=COMPARISON_COLUMNS)
+        print(
+            comparison.to_string(
+                index=False,
+                formatters={column: _format_scalar for column in COMPARISON_COLUMNS[1:]},
+            )
+        )
         return 0
     except Exception as exc:  # noqa: BLE001 - CLI should fail fast with a clear terminal error.
         structured_step("RESEARCH DIAGNOSTICS FAILED")
