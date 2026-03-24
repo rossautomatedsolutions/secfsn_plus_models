@@ -29,6 +29,10 @@ class BaseModel(ABC):
     def predict(self, X: pd.DataFrame) -> pd.Series:
         """Return predictions aligned to the exact index of ``X``."""
 
+    @abstractmethod
+    def feature_importance(self, feature_names: pd.Index) -> pd.Series:
+        """Return fitted feature-importance values aligned to ``feature_names``."""
+
     def _validate_training_data(self, X: pd.DataFrame, y: pd.Series) -> None:
         """Validate pandas training inputs shared by concrete models."""
         validate_multiindex_pandas_object(X, "X")

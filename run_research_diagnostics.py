@@ -249,7 +249,19 @@ def _build_robustness_flags(summary):
 
 
 def _print_robustness_section(runtime_config, model_names) -> None:
+    from secfsn_plus_models.automation import run_robustness_analysis
+
     _, summary = _run_seeded_robustness_analysis(runtime_config, model_names)
+    robustness = run_robustness_analysis(
+        replace(
+            runtime_config,
+            feature_matrix_path=None,
+            synthetic_seed=ROBUSTNESS_SEEDS[0],
+            robustness_runs=len(ROBUSTNESS_SEEDS),
+        ),
+        model_names=model_names,
+        run_count=len(ROBUSTNESS_SEEDS),
+    )
 
     structured_step("ROBUSTNESS ANALYSIS")
     _print_kv("dataset_source", "regenerated synthetic dataset for each seed")
@@ -269,6 +281,31 @@ def _print_robustness_section(runtime_config, model_names) -> None:
             print(warning)
     else:
         print("No robustness warnings triggered.")
+    print()
+
+    structured_step("FEATURE STABILITY")
+    if robustness.feature_stability.empty:
+        print("No feature stability rows available.")
+    else:
+        for model_name, model_frame in robustness.feature_stability.groupby("model_name", sort=True):
+            print(f"[{model_name}]")
+            print(
+                model_frame.loc[:, ["feature_name", "mean_importance", "std_importance"]].to_string(
+                    index=False,
+                    formatters={
+                        "mean_importance": _format_scalar,
+                        "std_importance": _format_scalar,
+                    },
+                )
+            )
+            print()
+
+    structured_step("FEATURE STABILITY FLAGS")
+    if robustness.feature_warnings:
+        for warning in robustness.feature_warnings:
+            print(warning.message)
+    else:
+        print("No feature stability warnings triggered.")
     print()
 
 

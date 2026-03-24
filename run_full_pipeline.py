@@ -126,6 +126,30 @@ def main() -> int:
                 print(warning.message)
         else:
             print("No robustness warnings triggered.")
+
+        structured_step("FEATURE STABILITY")
+        if robustness.feature_stability.empty:
+            print("No feature stability rows available.")
+        else:
+            for model_name, model_frame in robustness.feature_stability.groupby("model_name", sort=True):
+                print(f"[{model_name}]")
+                print(
+                    model_frame.loc[:, ["feature_name", "mean_importance", "std_importance"]].to_string(
+                        index=False,
+                        formatters={
+                            "mean_importance": _format_scalar,
+                            "std_importance": _format_scalar,
+                        },
+                    )
+                )
+                print()
+
+        structured_step("FEATURE STABILITY FLAGS")
+        if robustness.feature_warnings:
+            for warning in robustness.feature_warnings:
+                print(warning.message)
+        else:
+            print("No feature stability warnings triggered.")
         return 0
     except Exception as exc:  # noqa: BLE001 - CLI should fail fast with a clear terminal error.
         structured_step("PIPELINE FAILED")

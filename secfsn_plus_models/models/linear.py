@@ -33,3 +33,7 @@ class LinearRegressionModel(BaseModel):
     def predict(self, X: pd.DataFrame) -> pd.Series:
         self._validate_prediction_input(X)
         return pd.Series(self._model.predict(X), index=X.index, name="prediction")
+
+    def feature_importance(self, feature_names: pd.Index) -> pd.Series:
+        coefficients = pd.Series(self._model.coef_, index=feature_names, dtype=float, name="importance")
+        return coefficients.rename_axis("feature_name")
