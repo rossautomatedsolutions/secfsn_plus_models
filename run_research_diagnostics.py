@@ -203,6 +203,8 @@ def _run_seeded_robustness_analysis(runtime_config, model_names):
 
     robustness_config = replace(
         runtime_config,
+        use_synthetic_data=True,
+        data_path=None,
         feature_matrix_path=None,
         synthetic_seed=ROBUSTNESS_SEEDS[0],
         robustness_runs=len(ROBUSTNESS_SEEDS),
@@ -255,6 +257,8 @@ def _print_robustness_section(runtime_config, model_names) -> None:
     robustness = run_robustness_analysis(
         replace(
             runtime_config,
+            use_synthetic_data=True,
+            data_path=None,
             feature_matrix_path=None,
             synthetic_seed=ROBUSTNESS_SEEDS[0],
             robustness_runs=len(ROBUSTNESS_SEEDS),

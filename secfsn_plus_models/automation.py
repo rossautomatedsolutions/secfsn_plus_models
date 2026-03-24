@@ -60,6 +60,8 @@ class ResolvedConfig:
     train_end_period: str | None
     model_type: str
     test_size: int | None
+    use_synthetic_data: bool
+    data_path: str | None
     feature_matrix_path: str | None
     synthetic_seed: int
     robustness_runs: int
@@ -120,7 +122,20 @@ def resolve_runtime_config(config_module: Any) -> ResolvedConfig:
     train_end_period = getattr(config_module, "train_end_period", None)
     model_type = getattr(config_module, "model_type", "linear")
     test_size = getattr(config_module, "test_size", None)
+    use_synthetic_data = getattr(config_module, "USE_SYNTHETIC_DATA", None)
+    if use_synthetic_data is None:
+        use_synthetic_data = getattr(config_module, "use_synthetic_data", None)
+    if use_synthetic_data is None:
+        use_synthetic_data = False
+
+    data_path = getattr(config_module, "DATA_PATH", None)
+    if data_path is None:
+        data_path = getattr(config_module, "data_path", None)
+
     feature_matrix_path = getattr(config_module, "feature_matrix_path", None)
+    if feature_matrix_path is None:
+        feature_matrix_path = data_path
+
     synthetic_seed = getattr(config_module, "synthetic_seed", DEFAULT_SYNTHETIC_SEED)
     robustness_runs = getattr(config_module, "robustness_runs", DEFAULT_ROBUSTNESS_RUNS)
 
@@ -145,8 +160,14 @@ def resolve_runtime_config(config_module: Any) -> ResolvedConfig:
     if train_end_period is None and test_size is None:
         raise ValueError("Either config.train_end_period or config.test_size must be provided.")
 
+    if not isinstance(use_synthetic_data, bool):
+        raise ValueError("config.USE_SYNTHETIC_DATA must be a boolean.")
+    if data_path is not None and not isinstance(data_path, str):
+        raise ValueError("config.DATA_PATH must be None or a string path.")
     if feature_matrix_path is not None and not isinstance(feature_matrix_path, str):
         raise ValueError("config.feature_matrix_path must be None or a string path.")
+    if not use_synthetic_data and not feature_matrix_path:
+        raise ValueError("config.DATA_PATH (or config.feature_matrix_path) is required when USE_SYNTHETIC_DATA=False.")
     if not isinstance(synthetic_seed, int):
         raise ValueError("config.synthetic_seed must be an integer.")
     if not isinstance(robustness_runs, int) or robustness_runs <= 0:
@@ -157,6 +178,8 @@ def resolve_runtime_config(config_module: Any) -> ResolvedConfig:
         train_end_period=train_end_period.strip() if isinstance(train_end_period, str) else None,
         model_type=normalized_model_type,
         test_size=test_size,
+        use_synthetic_data=use_synthetic_data,
+        data_path=feature_matrix_path,
         feature_matrix_path=feature_matrix_path,
         synthetic_seed=synthetic_seed,
         robustness_runs=robustness_runs,
@@ -432,10 +455,18 @@ def _read_feature_matrix(path: Path) -> pd.DataFrame:
 
 def load_feature_matrix(
     price_column: str,
+    features_df: pd.DataFrame | None = None,
     feature_matrix_path: str | None = None,
+    use_synthetic_data: bool = True,
     synthetic_seed: int = DEFAULT_SYNTHETIC_SEED,
 ) -> tuple[pd.DataFrame, str]:
-    """Load a real feature matrix when available, otherwise fall back to a synthetic dataset."""
+    """Load a feature matrix from DataFrame/path, or synthesize one when enabled."""
+    if features_df is not None:
+        validate_multiindex_pandas_object(features_df, "features_df")
+        normalized = features_df.copy()
+        normalized.index = normalized.index.set_names(["cik", "period"])
+        return normalized.sort_index(), "loaded in-memory DataFrame input"
+
     candidate_paths: list[Path] = []
     if feature_matrix_path:
         candidate_paths.append(Path(feature_matrix_path).expanduser())
@@ -444,6 +475,10 @@ def load_feature_matrix(
         if candidate.exists():
             features_df = _read_feature_matrix(candidate)
             return features_df, f"loaded real dataset from {candidate}"
+
+    if not use_synthetic_data:
+        required_path = feature_matrix_path if feature_matrix_path else "<unspecified>"
+        raise FileNotFoundError(f"Real dataset is required but was not found at {required_path}.")
 
     fallback = generate_synthetic_feature_matrix(price_column=price_column, seed=synthetic_seed)
     return fallback, f"generated synthetic fallback dataset (seed={synthetic_seed})"
@@ -483,6 +518,8 @@ def validate_label_generation(features_df: pd.DataFrame, price_column: str, labe
 
     labels_aligned = labels.sort_index()
     expected_aligned = expected.sort_index()
+    if labels_aligned.empty:
+        raise ValueError("Insufficient history to compute forward returns: every cik needs at least two periods.")
     if not labels_aligned.index.equals(expected_aligned.index):
         raise ValueError("Generated labels are not correctly aligned to the expected next-period rows.")
 
@@ -519,6 +556,7 @@ def resolve_train_end_period(
 def build_pipeline_artifacts(
     config: ResolvedConfig,
     *,
+    features_df: pd.DataFrame | None = None,
     synthetic_seed: int | None = None,
     model_type_override: str | None = None,
 ) -> PipelineArtifacts:
@@ -526,8 +564,10 @@ def build_pipeline_artifacts(
     effective_seed = config.synthetic_seed if synthetic_seed is None else synthetic_seed
     effective_model_type = config.model_type if model_type_override is None else model_type_override
     features_df, _ = load_feature_matrix(
-        config.price_column,
-        config.feature_matrix_path,
+        price_column=config.price_column,
+        features_df=features_df,
+        feature_matrix_path=config.feature_matrix_path,
+        use_synthetic_data=config.use_synthetic_data,
         synthetic_seed=effective_seed,
     )
     validate_feature_matrix_assumptions(features_df, config.price_column)
@@ -573,8 +613,9 @@ def build_pipeline_artifacts(
 def run_diagnostics(config: ResolvedConfig) -> DiagnosticsReport:
     """Run validations required by the diagnostics CLI entrypoint."""
     features_df, _ = load_feature_matrix(
-        config.price_column,
-        config.feature_matrix_path,
+        price_column=config.price_column,
+        feature_matrix_path=config.feature_matrix_path,
+        use_synthetic_data=config.use_synthetic_data,
         synthetic_seed=config.synthetic_seed,
     )
     numeric_coverage = validate_feature_matrix_assumptions(features_df, config.price_column)

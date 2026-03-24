@@ -19,8 +19,9 @@ def main() -> int:
 
         structured_step("LOAD FEATURE MATRIX")
         _, source_message = load_feature_matrix(
-            runtime_config.price_column,
-            runtime_config.feature_matrix_path,
+            price_column=runtime_config.price_column,
+            feature_matrix_path=runtime_config.feature_matrix_path,
+            use_synthetic_data=runtime_config.use_synthetic_data,
             synthetic_seed=runtime_config.synthetic_seed,
         )
         print("status: success")
