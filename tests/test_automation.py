@@ -4,9 +4,11 @@ import pandas as pd
 import pytest
 
 from secfsn_plus_models.automation import (
+    build_feature_stability_summary,
     build_robustness_summary,
     build_pipeline_artifacts,
     generate_synthetic_feature_matrix,
+    interpret_feature_stability,
     interpret_robustness_summary,
     resolve_train_end_period,
     run_robustness_analysis,
@@ -104,6 +106,14 @@ def test_synthetic_pipeline_ic_mean_stays_in_target_signal_range() -> None:
     assert 0.05 <= rank_ic_mean <= 0.12
 
 
+def test_build_pipeline_artifacts_exposes_feature_importance() -> None:
+    artifacts = build_pipeline_artifacts(_Config())
+
+    assert artifacts.feature_importance.index.tolist() == artifacts.X_train.columns.tolist()
+    assert artifacts.feature_importance.name == "importance"
+    assert artifacts.feature_importance.notna().all()
+
+
 def test_summarize_run_metrics_returns_expected_fields() -> None:
     artifacts = build_pipeline_artifacts(_Config())
 
@@ -117,8 +127,10 @@ def test_run_robustness_analysis_collects_runs_and_summary() -> None:
     analysis = run_robustness_analysis(_Config(), model_names=["linear_regression", "random_forest"], run_count=3)
 
     assert len(analysis.per_run_metrics) == 6
+    assert len(analysis.per_run_feature_importance) == 30
     assert set(analysis.per_run_metrics["seed"]) == {20240323, 20240324, 20240325}
     assert set(analysis.summary["model_name"]) == {"linear_regression", "random_forest"}
+    assert set(analysis.feature_stability["model_name"]) == {"linear_regression", "random_forest"}
     assert {
         "IC_mean",
         "IC_std",
@@ -133,6 +145,34 @@ def test_run_robustness_analysis_collects_runs_and_summary() -> None:
         "spread_min",
         "spread_max",
     }.issubset(set(analysis.summary.columns))
+    assert {
+        "feature_name",
+        "mean_importance",
+        "std_importance",
+        "mean_abs_importance",
+        "rank_stability",
+    }.issubset(set(analysis.feature_stability.columns))
+
+
+def test_build_feature_stability_summary_and_flags_capture_expected_signals() -> None:
+    summary = build_feature_stability_summary(
+        pd.DataFrame(
+            [
+                {"run_id": 1, "seed": 1, "model_name": "linear_regression", "feature_name": "stable", "importance": 0.30, "abs_importance": 0.30},
+                {"run_id": 1, "seed": 1, "model_name": "linear_regression", "feature_name": "unstable", "importance": 0.40, "abs_importance": 0.40},
+                {"run_id": 2, "seed": 2, "model_name": "linear_regression", "feature_name": "stable", "importance": 0.31, "abs_importance": 0.31},
+                {"run_id": 2, "seed": 2, "model_name": "linear_regression", "feature_name": "unstable", "importance": -0.05, "abs_importance": 0.05},
+                {"run_id": 3, "seed": 3, "model_name": "linear_regression", "feature_name": "stable", "importance": 0.29, "abs_importance": 0.29},
+                {"run_id": 3, "seed": 3, "model_name": "linear_regression", "feature_name": "unstable", "importance": 0.55, "abs_importance": 0.55},
+            ]
+        )
+    )
+
+    warnings = interpret_feature_stability(summary)
+
+    assert {"stable", "unstable"} == set(summary["feature_name"])
+    assert any(warning.warning_type == "consistent_signal" and warning.feature_name == "stable" for warning in warnings)
+    assert any(warning.warning_type == "unstable_feature" and warning.feature_name == "unstable" for warning in warnings)
 
 
 def test_interpret_robustness_summary_flags_large_ranges() -> None:

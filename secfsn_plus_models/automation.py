@@ -15,7 +15,6 @@ from .labels import compute_next_period_return
 from .metrics import information_coefficient, rank_information_coefficient
 from .models.registry import ModelRegistry
 from .splits import time_based_split
-from .trainer import train_and_predict
 from .utils import validate_multiindex_pandas_object, validate_required_columns
 
 
@@ -35,6 +34,7 @@ class PipelineArtifacts:
     predictions: pd.Series
     ic_by_period: pd.Series
     rank_ic_by_period: pd.Series
+    feature_importance: pd.Series
 
 
 @dataclass(frozen=True)
@@ -76,12 +76,25 @@ class RobustnessWarning:
 
 
 @dataclass(frozen=True)
+class FeatureStabilityWarning:
+    """Interpretation flag emitted when feature importance looks unstable or persistent."""
+
+    model_name: str
+    feature_name: str
+    warning_type: str
+    message: str
+
+
+@dataclass(frozen=True)
 class RobustnessAnalysis:
     """Per-run metrics, summary statistics, and warnings for robustness evaluation."""
 
     per_run_metrics: pd.DataFrame
     summary: pd.DataFrame
     warnings: list[RobustnessWarning]
+    per_run_feature_importance: pd.DataFrame
+    feature_stability: pd.DataFrame
+    feature_warnings: list[FeatureStabilityWarning]
 
 
 SUPPORTED_FILE_SUFFIXES = {".csv", ".parquet", ".pkl", ".pickle"}
@@ -92,6 +105,8 @@ HIGH_VARIANCE_RULES = {
     "RankIC_mean": {"std_floor": 0.050, "range_floor": 0.18},
     "spread": {"std_floor": 0.030, "range_floor": 0.10},
 }
+FEATURE_STABILITY_STD_RATIO = 0.75
+FEATURE_SIGNAL_RANK_STD_MAX = 1.5
 
 
 def structured_step(title: str) -> None:
@@ -530,7 +545,11 @@ def build_pipeline_artifacts(
         raise ValueError("Invalid split: train and test datasets overlap.")
 
     model = ModelRegistry.create(effective_model_type)
-    predictions = train_and_predict(model, X_train, y_train, X_test)
+    model.fit(X_train, y_train)
+    predictions = model.predict(X_test.copy()).rename("prediction")
+    if not predictions.index.equals(X_test.index):
+        raise ValueError("model.predict must preserve the exact X_test MultiIndex.")
+    feature_importance = model.feature_importance(X_train.columns)
     ic_by_period = information_coefficient(y_test, predictions)
     rank_ic_by_period = rank_information_coefficient(y_test, predictions)
 
@@ -547,6 +566,7 @@ def build_pipeline_artifacts(
         predictions=predictions,
         ic_by_period=ic_by_period,
         rank_ic_by_period=rank_ic_by_period,
+        feature_importance=feature_importance,
     )
 
 
@@ -643,6 +663,49 @@ def build_robustness_summary(per_run_metrics: pd.DataFrame) -> pd.DataFrame:
     return summary
 
 
+def build_feature_stability_summary(per_run_feature_importance: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate per-run feature importances into mean/std/rank-stability by model and feature."""
+    if per_run_feature_importance.empty:
+        return pd.DataFrame(
+            columns=[
+                "model_name",
+                "feature_name",
+                "mean_importance",
+                "std_importance",
+                "mean_abs_importance",
+                "rank_stability",
+            ]
+        )
+
+    ranked = per_run_feature_importance.copy()
+    ranked.loc[:, "importance_rank"] = ranked.groupby(["model_name", "run_id"], sort=False)["abs_importance"].rank(
+        method="average",
+        ascending=False,
+    )
+
+    summary = (
+        ranked.groupby(["model_name", "feature_name"], sort=True)
+        .agg(
+            mean_importance=("importance", "mean"),
+            std_importance=("importance", "std"),
+            mean_abs_importance=("abs_importance", "mean"),
+            rank_stability=("importance_rank", "std"),
+        )
+        .reset_index()
+    )
+    numeric_columns = [
+        "mean_importance",
+        "std_importance",
+        "mean_abs_importance",
+        "rank_stability",
+    ]
+    summary.loc[:, numeric_columns] = summary.loc[:, numeric_columns].astype(float)
+    return summary.sort_values(
+        by=["model_name", "mean_abs_importance", "feature_name"],
+        ascending=[True, False, True],
+    ).reset_index(drop=True)
+
+
 def interpret_robustness_summary(summary: pd.DataFrame) -> list[RobustnessWarning]:
     """Generate warning flags for high variance or wide performance ranges."""
     warnings: list[RobustnessWarning] = []
@@ -695,6 +758,57 @@ def interpret_robustness_summary(summary: pd.DataFrame) -> list[RobustnessWarnin
     return warnings
 
 
+def interpret_feature_stability(summary: pd.DataFrame) -> list[FeatureStabilityWarning]:
+    """Generate interpretation flags for unstable or consistently strong features."""
+    warnings: list[FeatureStabilityWarning] = []
+    if summary.empty:
+        return warnings
+
+    for row in summary.to_dict(orient="records"):
+        model_name = str(row["model_name"])
+        feature_name = str(row["feature_name"])
+        mean_importance = float(row["mean_importance"])
+        std_importance = float(row["std_importance"])
+        mean_abs_importance = float(row["mean_abs_importance"])
+        rank_stability = float(row["rank_stability"])
+
+        if (
+            np.isfinite(std_importance)
+            and np.isfinite(mean_abs_importance)
+            and std_importance > max(0.0, mean_abs_importance * FEATURE_STABILITY_STD_RATIO)
+        ):
+            warnings.append(
+                FeatureStabilityWarning(
+                    model_name=model_name,
+                    feature_name=feature_name,
+                    warning_type="unstable_feature",
+                    message=(
+                        f"WARNING: {model_name} feature '{feature_name}' is unstable "
+                        f"(std_importance={std_importance:.6f}, mean_abs_importance={mean_abs_importance:.6f})."
+                    ),
+                )
+            )
+
+        if (
+            np.isfinite(mean_abs_importance)
+            and mean_abs_importance > 0.0
+            and np.isfinite(rank_stability)
+            and rank_stability <= FEATURE_SIGNAL_RANK_STD_MAX
+        ):
+            warnings.append(
+                FeatureStabilityWarning(
+                    model_name=model_name,
+                    feature_name=feature_name,
+                    warning_type="consistent_signal",
+                    message=(
+                        f"INFO: {model_name} feature '{feature_name}' shows consistent signal "
+                        f"(mean_abs_importance={mean_abs_importance:.6f}, rank_stability={rank_stability:.6f})."
+                    ),
+                )
+            )
+    return warnings
+
+
 def run_robustness_analysis(
     config: ResolvedConfig,
     *,
@@ -708,6 +822,7 @@ def run_robustness_analysis(
         raise ValueError("run_count must be a positive integer.")
 
     rows: list[dict[str, float | int | str]] = []
+    feature_rows: list[dict[str, float | int | str]] = []
     for run_idx in range(run_total):
         seed = config.synthetic_seed + run_idx
         for model_name in selected_model_names:
@@ -727,11 +842,35 @@ def run_robustness_analysis(
                     "spread": float(metrics["spread"]),
                 }
             )
+            for feature_name, importance in artifacts.feature_importance.items():
+                feature_rows.append(
+                    {
+                        "run_id": run_idx + 1,
+                        "seed": seed,
+                        "model_name": model_name,
+                        "feature_name": str(feature_name),
+                        "importance": float(importance),
+                        "abs_importance": float(abs(importance)),
+                    }
+                )
 
     per_run_metrics = pd.DataFrame(
         rows,
         columns=["run_id", "seed", "model_name", "IC_mean", "RankIC_mean", "spread"],
     )
+    per_run_feature_importance = pd.DataFrame(
+        feature_rows,
+        columns=["run_id", "seed", "model_name", "feature_name", "importance", "abs_importance"],
+    )
     summary = build_robustness_summary(per_run_metrics)
     warnings = interpret_robustness_summary(summary)
-    return RobustnessAnalysis(per_run_metrics=per_run_metrics, summary=summary, warnings=warnings)
+    feature_stability = build_feature_stability_summary(per_run_feature_importance)
+    feature_warnings = interpret_feature_stability(feature_stability)
+    return RobustnessAnalysis(
+        per_run_metrics=per_run_metrics,
+        summary=summary,
+        warnings=warnings,
+        per_run_feature_importance=per_run_feature_importance,
+        feature_stability=feature_stability,
+        feature_warnings=feature_warnings,
+    )
