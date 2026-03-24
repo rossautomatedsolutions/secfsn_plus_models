@@ -12,8 +12,8 @@ model_type = "linear"
 test_size = None
 
 # Data source controls.
-USE_SYNTHETIC_DATA = False
-DATA_PATH = "path_to_secfsn_plus_output.parquet"
+USE_SYNTHETIC_DATA = True
+DATA_PATH = None
 
 # Backward-compatible aliases.
 use_synthetic_data = USE_SYNTHETIC_DATA
