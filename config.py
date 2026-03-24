@@ -11,9 +11,14 @@ model_type = "linear"
 # the last ``test_size`` quarterly periods are reserved for testing.
 test_size = None
 
-# Optional real dataset path. Supported formats are CSV, Parquet, and Pickle. When this remains
-# ``None`` or the file does not exist, the CLI scripts automatically generate a synthetic dataset.
-feature_matrix_path = None
+# Data source controls.
+USE_SYNTHETIC_DATA = False
+DATA_PATH = "path_to_secfsn_plus_output.parquet"
+
+# Backward-compatible aliases.
+use_synthetic_data = USE_SYNTHETIC_DATA
+data_path = DATA_PATH
+feature_matrix_path = DATA_PATH
 
 # Synthetic-data robustness settings. When the feature matrix falls back to the built-in synthetic
 # generator, ``synthetic_seed`` is the first seed used and ``robustness_runs`` controls how many

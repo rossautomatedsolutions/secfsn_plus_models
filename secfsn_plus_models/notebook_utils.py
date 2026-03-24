@@ -100,11 +100,18 @@ def load_notebook_demo_artifacts(
         train_end_period=train_end_period,
         model_type=model_type,
         test_size=test_size,
+        use_synthetic_data=feature_matrix_path is None,
+        data_path=feature_matrix_path,
         feature_matrix_path=feature_matrix_path,
         synthetic_seed=20240323,
         robustness_runs=10,
     )
-    _, dataset_source = load_feature_matrix(price_column, feature_matrix_path, synthetic_seed=config.synthetic_seed)
+    _, dataset_source = load_feature_matrix(
+        price_column=price_column,
+        feature_matrix_path=feature_matrix_path,
+        use_synthetic_data=config.use_synthetic_data,
+        synthetic_seed=config.synthetic_seed,
+    )
     pipeline = build_pipeline_artifacts(config)
     evaluation_summary = evaluate_cross_sectional_model(pipeline.y_test, pipeline.predictions)
     return NotebookDemoArtifacts(

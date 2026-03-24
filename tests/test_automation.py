@@ -10,6 +10,8 @@ from secfsn_plus_models.automation import (
     generate_synthetic_feature_matrix,
     interpret_feature_stability,
     interpret_robustness_summary,
+    load_feature_matrix,
+    resolve_runtime_config,
     resolve_train_end_period,
     run_robustness_analysis,
     run_diagnostics,
@@ -25,6 +27,8 @@ class _Config:
     train_end_period = "2020Q4"
     model_type = "linear_regression"
     test_size = None
+    USE_SYNTHETIC_DATA = True
+    DATA_PATH = None
     feature_matrix_path = None
     synthetic_seed = 20240323
     robustness_runs = 4
@@ -77,6 +81,38 @@ def test_validate_label_generation_matches_reference_formula(synthetic_panel: pd
     expected = compute_next_period_return(synthetic_panel, "price")
 
     pd.testing.assert_series_equal(labels, expected)
+
+
+def test_load_feature_matrix_accepts_in_memory_dataframe(synthetic_panel: pd.DataFrame) -> None:
+    loaded, source = load_feature_matrix(price_column="price", features_df=synthetic_panel, use_synthetic_data=False)
+
+    pd.testing.assert_frame_equal(loaded, synthetic_panel.sort_index())
+    assert source == "loaded in-memory DataFrame input"
+
+
+def test_load_feature_matrix_requires_real_dataset_when_synthetic_disabled(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError, match="Real dataset is required"):
+        load_feature_matrix(
+            price_column="price",
+            feature_matrix_path=str(tmp_path / "missing.parquet"),
+            use_synthetic_data=False,
+        )
+
+
+def test_resolve_runtime_config_rejects_missing_data_path_when_synthetic_disabled() -> None:
+    class _MissingPathConfig:
+        price_column = "price"
+        train_end_period = "2020Q4"
+        model_type = "linear_regression"
+        test_size = None
+        USE_SYNTHETIC_DATA = False
+        DATA_PATH = None
+        feature_matrix_path = None
+        synthetic_seed = 20240323
+        robustness_runs = 2
+
+    with pytest.raises(ValueError, match="config.DATA_PATH"):
+        resolve_runtime_config(_MissingPathConfig())
 
 
 def test_resolve_train_end_period_uses_test_size_when_needed(synthetic_panel: pd.DataFrame) -> None:
