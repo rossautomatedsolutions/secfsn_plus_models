@@ -116,6 +116,26 @@ def structured_step(title: str) -> None:
     print(f"=== {title} ===")
 
 
+def _config_use_synthetic_data(config: Any) -> bool:
+    """Read synthetic-data preference from resolved or legacy config objects."""
+    value = getattr(config, "use_synthetic_data", None)
+    if value is None:
+        value = getattr(config, "USE_SYNTHETIC_DATA", None)
+    if value is None:
+        return False
+    return bool(value)
+
+
+def _config_feature_matrix_path(config: Any) -> str | None:
+    """Read the preferred feature-matrix path from resolved or legacy config objects."""
+    value = getattr(config, "feature_matrix_path", None)
+    if value is None:
+        value = getattr(config, "data_path", None)
+    if value is None:
+        value = getattr(config, "DATA_PATH", None)
+    return value
+
+
 def resolve_runtime_config(config_module: Any) -> ResolvedConfig:
     """Read and validate supported configuration attributes from ``config.py``."""
     price_column = getattr(config_module, "price_column", None)
@@ -566,8 +586,8 @@ def build_pipeline_artifacts(
     features_df, _ = load_feature_matrix(
         price_column=config.price_column,
         features_df=features_df,
-        feature_matrix_path=config.feature_matrix_path,
-        use_synthetic_data=config.use_synthetic_data,
+        feature_matrix_path=_config_feature_matrix_path(config),
+        use_synthetic_data=_config_use_synthetic_data(config),
         synthetic_seed=effective_seed,
     )
     validate_feature_matrix_assumptions(features_df, config.price_column)
@@ -614,8 +634,8 @@ def run_diagnostics(config: ResolvedConfig) -> DiagnosticsReport:
     """Run validations required by the diagnostics CLI entrypoint."""
     features_df, _ = load_feature_matrix(
         price_column=config.price_column,
-        feature_matrix_path=config.feature_matrix_path,
-        use_synthetic_data=config.use_synthetic_data,
+        feature_matrix_path=_config_feature_matrix_path(config),
+        use_synthetic_data=_config_use_synthetic_data(config),
         synthetic_seed=config.synthetic_seed,
     )
     numeric_coverage = validate_feature_matrix_assumptions(features_df, config.price_column)

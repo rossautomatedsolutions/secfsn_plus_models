@@ -1,4 +1,4 @@
-"""Layer 3 modeling package for SECFSN+ quarterly research workflows."""
+"""Layer 04 modeling package for SECFSN+ quarterly research workflows."""
 
 from .dataset import build_model_dataset
 from .evaluation import decile_spread, evaluate_cross_sectional_model
@@ -14,10 +14,14 @@ from .notebook_utils import (
     summarize_split_artifacts,
 )
 from .metrics import information_coefficient, rank_information_coefficient
+from .outputs import build_model_output_frame
 from .splits import time_based_split
 from .trainer import train_and_predict
+from .models.registry import ModelRegistry
+from .data_loader import load_feature_matrix
 
 __all__ = [
+    "load_feature_matrix",
     "build_model_dataset",
     "compute_next_period_return",
     "time_based_split",
@@ -34,4 +38,6 @@ __all__ = [
     "compare_model_runs",
     "summarize_period_metrics",
     "build_prediction_evaluation_frame",
+    "build_model_output_frame",
+    "ModelRegistry",
 ]

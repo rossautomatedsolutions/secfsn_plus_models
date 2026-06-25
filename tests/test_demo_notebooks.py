@@ -8,6 +8,7 @@ NOTEBOOK_PATHS = [
     Path("notebooks/02_baseline_model_training.ipynb"),
     Path("notebooks/03_model_comparison.ipynb"),
     Path("notebooks/04_prediction_evaluation.ipynb"),
+    Path("notebooks/04_layer04_models_demo.ipynb"),
 ]
 
 EXPECTED_FIRST_CELL = (
@@ -25,3 +26,5 @@ def test_demo_notebooks_exist_and_reference_repository_utilities() -> None:
         assert "".join(notebook["cells"][0]["source"]) == EXPECTED_FIRST_CELL
         code_sources = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
         assert any("secfsn_plus_models.notebook_utils" in source for source in code_sources)
+        if notebook_path.name == "04_layer04_models_demo.ipynb":
+            assert any("build_model_output_frame" in source for source in code_sources)
